@@ -145,3 +145,6 @@ poetry.toml
 /.windsurf/
 # emscripten
 a.out.*
+
+# tt-metal generated files
+/generated

@@ -237,8 +237,8 @@ static size_t g_metalium_base_offset = 0;
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static tt::tt_metal::DataType ggml2tt_type_internal(ggml_type ggtype, tt::ARCH arch) {
-    // This table is consulted to map GGML types to TT types dueing tensor creation
-    if(arch == tt::ARCH::WORMHOLE_B0) {
+    // This table is consulted to map GGML types to TT types doing tensor creation
+    if(arch == tt::ARCH::WORMHOLE_B0 || arch == tt::ARCH::BLACKHOLE) {
         static constexpr std::array<tt::tt_metal::DataType, GGML_TYPE_COUNT> table = {
             /*GGML_TYPE_F32        = */ tt::tt_metal::DataType::BFLOAT16,
             /*GGML_TYPE_F16        = */ tt::tt_metal::DataType::BFLOAT16,
@@ -3133,7 +3133,7 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg()
             ttnn::enable_program_cache(*device);
         }
         // Limit device support to the ones I own (GS is removed as TTNN dropped support)
-        GGML_ASSERT(device->arch() == tt::ARCH::WORMHOLE_B0);
+        GGML_ASSERT(device->arch() == tt::ARCH::WORMHOLE_B0 || device->arch() == tt::ARCH::BLACKHOLE);
         dev_ctx->device = device;
         dev_ctx->device_id = device_id;
         dev_ctx->name = "METALIUM" + std::to_string(device_id);
