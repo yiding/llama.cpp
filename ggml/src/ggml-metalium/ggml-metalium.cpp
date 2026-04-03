@@ -39,6 +39,7 @@
 #include <string_view>
 #include <ttnn/core.hpp>
 #include <ttnn/device.hpp>
+#include <ttnn/operations/creation/creation.hpp>
 #include <ttnn/operations/eltwise/binary/binary.hpp>
 #include <ttnn/operations/data_movement/tilize_with_val_padding/tilize_with_val_padding.hpp>
 #include <ttnn/operations/matmul/matmul.hpp>
@@ -49,7 +50,6 @@
 #include <ttnn/operations/normalization/rmsnorm/rmsnorm.hpp>
 #include <ttnn/operations/data_movement/untilize/untilize.hpp>
 #include <ttnn/operations/experimental/transformer/nlp_kv_cache_load_slice/nlp_kv_cache_load_slice.hpp>
-#include <ttnn/operations/creation.hpp>
 #include <ttnn/operations/eltwise/unary/unary_composite.hpp>
 #include <ttnn/operations/data_movement/transpose/transpose.hpp>
 #include <ttnn/operations/data_movement/permute/permute.hpp>
@@ -57,7 +57,6 @@
 #include <ttnn/operations/data_movement/concat/concat.hpp>
 #include <ttnn/operations/copy/typecast/typecast.hpp>
 #include <ttnn/operations/normalization/softmax/softmax.hpp>
-#include <tt-metalium/persistent_kernel_cache.hpp>
 #include <ttnn/operations/data_movement/reshape_view/reshape.hpp>
 #include <ttnn/operations/reduction/generic/generic_reductions.hpp>
 #include <ttnn/cpp/ttnn/operations/data_movement/gather/tosa/gather_tosa.hpp>
@@ -69,9 +68,9 @@
 #include <type_traits>
 #include <vector>
 
-#include "rope.hpp"
-#include "mul_mat.hpp"
-#include "soft_max.hpp"
+// #include "rope.hpp"
+// #include "mul_mat.hpp"
+// #include "soft_max.hpp"
 
 extern void metalium_register_all_kernel();
 
@@ -971,36 +970,21 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
         auto &a = *ap;
         auto &b = *bp;
 
-        tt::tt_metal::Tensor aT;
-        if(src0->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
-            ggml_tensor_extra_metalium* meta0 = (ggml_tensor_extra_metalium*)src0->extra;
-            if(meta0->is_pretransposed) {
-                aT = *meta0->tensor;
-            }
-            else {
-                aT = ttnn::transpose(a, -2, -1);
-                meta0->tensor = std::make_shared<tt::tt_metal::Tensor>(aT);
-                meta0->is_pretransposed = true;
-            }
-        }
-        else {
-            aT = ttnn::transpose(a, -2, -1);
-        }
-        GGML_ASSERT(aT.is_allocated() && "Matrix aT is not allocated");
-        // TODO: Ask TT to support multiplication of pre-transposed tensors. Calling transpose here is inefficient
-        // https://github.com/tenstorrent/tt-metal/issues/9709
-        ttnn::operations::matmul::Matmul cfg = ttnn::operations::matmul::Matmul{
-            .compute_kernel_config = make_compute_kernel_config(a.device()),
-            // XXX: Why output_tile doesn't have a default value?
-            .output_tile = std::nullopt,
-            .global_cb = std::nullopt,
-            .sub_device_id = std::nullopt,
-        };
         *dst_meta = {
-            .tensor = std::make_shared<tt::tt_metal::Tensor>(ttnn::operations::matmul::matmul(b, aT, std::nullopt, cfg)),
+            .tensor = std::make_shared<tt::tt_metal::Tensor>(ttnn::operations::matmul::matmul(
+                /*input_tensor_a=*/ b,
+                /*input_tensor_b=*/ a,
+                /*transpose_a=*/ false,
+                /*transpose_b=*/ true,
+                /*memory_config=*/ std::nullopt,
+                /*dtype=*/ std::nullopt,
+                /*program_config=*/ std::nullopt,
+                /*activation=*/ std::nullopt,
+                /*compute_kernel_config=*/ make_compute_kernel_config(a.device()))),
         };
     }
     else {
+#if 0
         // Our slow implementation of MUL_MAT using direct kernels
         uint32_t prec = dst->op_params[0];
         bool high_percision = prec == GGML_PREC_F32;
@@ -1010,6 +994,9 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
         *dst_meta = ggml_tensor_extra_metalium{
             .tensor = std::make_shared<tt::tt_metal::Tensor>(res),
         };
+#else
+        GGML_ABORT("unsupported matmul");
+#endif
     }
     GGML_ASSERT(dst_meta->tensor->storage_type() == tt::tt_metal::StorageType::DEVICE);
 }
@@ -1955,6 +1942,7 @@ static bool ggml_backend_metalium_can_rope(const struct ggml_tensor * dst)
 
 static void ggml_backend_metalium_rope(ggml_backend_metalium_context * ctx, struct ggml_tensor * dst)
 {
+#if 0
     GGML_METALIUM_OP_SANITY_CHECK(dst);
     GGML_METALIUM_OP_SRC0_SANITY_CHECK(dst);
     GGML_UNUSED(ctx);
@@ -2013,6 +2001,9 @@ static void ggml_backend_metalium_rope(ggml_backend_metalium_context * ctx, stru
     *dst_meta = {
         .tensor = std::make_shared<tt::tt_metal::Tensor>(std::move(res)),
     };
+#else
+    GGML_ABORT("not implemented");
+#endif
 }
 
 static bool ggml_backend_metalium_can_flash_attn(const struct ggml_tensor * dst)
@@ -3085,9 +3076,6 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg()
         if(getenv("TT_METAL_RUNTIME_ROOT") == NULL) {
             fmt::println(stderr, "The TT_METAL_RUNTIME_ROOT environment variables must be set to use the Metalium backend");
             abort();
-        }
-        if(!g_debug_flags.disable_program_cache) {
-            tt::tt_metal::detail::EnablePersistentKernelCache();
         }
         else {
             fmt::println("Disabling persistent kernel cache. Things will be slower");
