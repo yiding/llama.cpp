@@ -74,6 +74,8 @@
 
 extern void metalium_register_all_kernel();
 
+namespace {
+
 struct ggml_backend_metalium_context {
     ttnn::IDevice* device = nullptr;
     int device_id = 0;
@@ -109,6 +111,8 @@ struct ggml_tensor_extra_metalium
     std::shared_ptr<tt::tt_metal::Tensor> tensor;
     bool is_pretransposed = false;
 };
+
+} // anonymous namespace
 
 static bool ggml_tt_tensors_shape_equal(const ggml_tensor* ggtensor, const tt::tt_metal::Tensor& ttensor)
 {
@@ -1942,13 +1946,12 @@ static bool ggml_backend_metalium_can_rope(const struct ggml_tensor * dst)
 
 static void ggml_backend_metalium_rope(ggml_backend_metalium_context * ctx, struct ggml_tensor * dst)
 {
-#if 0
     GGML_METALIUM_OP_SANITY_CHECK(dst);
     GGML_METALIUM_OP_SRC0_SANITY_CHECK(dst);
     GGML_UNUSED(ctx);
 
+#if 0
     ggml_tensor_extra_metalium* dst_meta = (ggml_tensor_extra_metalium*)dst->extra;
-
     std::array<int32_t, 5> int_params;
     memcpy(int_params.data(), dst->op_params, sizeof(int_params));
     auto [
@@ -2442,7 +2445,6 @@ ggml_backend_metalium_buffer_init_tensor(ggml_backend_buffer_t buffer,
         meta->tensor = std::make_shared<tt::tt_metal::Tensor>(std::move(t));
     }
     // std::cout << "Creating tensor with address: " << tensor->data << ", shape = " << tensor->ne[0] << " " << tensor->ne[1] << " " << tensor->ne[2] << " " << tensor->ne[3] << ", name " << tensor->name << std::endl;
-    GGML_UNUSED(buffer);
     return GGML_STATUS_SUCCESS;
 }
 
@@ -2542,7 +2544,7 @@ static ggml_backend_buffer_type_t ggml_backend_metalium_buffer_type(ggml_backend
     auto bufctx = std::make_unique<ggml_backend_metalium_buffer_type_context>(
         ggml_backend_metalium_buffer_type_context{
             .device = dev_ctx->device,
-            .name = "Metalium " + std::to_string(device_id),
+            .name = "METALIUM" + std::to_string(device_id),
         });
     auto* bufctx_ptr = bufctx.get();
     buffer_type_context_deleter.insert(std::move(bufctx));
