@@ -5,6 +5,7 @@ endif()
 message(STATUS "Metalium found.")
 
 ggml_add_backend_library(ggml-metalium
+    buffer.cpp
     ggml-metalium.cpp
     utils.cpp
     # rope.cpp
