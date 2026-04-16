@@ -177,7 +177,8 @@ static tt::tt_metal::DataType ggml2tt_type_internal(ggml_type ggtype, tt::ARCH a
             /*GGML_TYPE_IQ4_NL_4_4 = */ tt::tt_metal::DataType::INVALID, // Support removed from GGML
             /*GGML_TYPE_IQ4_NL_4_8 = */ tt::tt_metal::DataType::INVALID, // Support removed from GGML
             /*GGML_TYPE_IQ4_NL_8_8 = */ tt::tt_metal::DataType::INVALID, // Support removed from GGML
-            /*GGML_TYPE_MXFP4      = */ tt::tt_metal::DataType::BFLOAT4_B,
+            // This is a bit wasteful, but MXFP4 can't be perfectly represented as BFLOAT4_B
+            /*GGML_TYPE_MXFP4      = */ tt::tt_metal::DataType::BFLOAT8_B,
         };
         // safeguard against OOB read from outdated table
         if(ggtype >= table.size()) {

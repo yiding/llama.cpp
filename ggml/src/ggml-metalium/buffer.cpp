@@ -392,6 +392,7 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     std::optional<tt::tt_metal::HostBuffer> storage;
     tt::tt_metal::DataType intermidiate_type = tt::tt_metal::DataType::BFLOAT16;
     bool tilize = true;
+    std::cout << "set_tensor: " << tensor->name << " ggtype: " << ggtype << std::endl;
     if(ggtype == GGML_TYPE_F32) {
         // For now we cast F32 to BF16. Need a scalable way to handle this as WORMHOLD_B0 have native support for F32
         // TODO: Enable proper FP32 when all related bugs gets fixed for devices that support it

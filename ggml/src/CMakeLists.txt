@@ -207,6 +207,11 @@ add_library(ggml-base
             ggml-quants.h
             gguf.cpp)
 
+# hack: this makes the build non-portable..
+set_source_files_properties(ggml-quants.c
+  PROPERTIES COMPILE_FLAGS "-O3 -march=native"
+)
+
 set_target_properties(ggml-base PROPERTIES
     VERSION ${GGML_VERSION}
     SOVERSION ${GGML_VERSION_MAJOR}

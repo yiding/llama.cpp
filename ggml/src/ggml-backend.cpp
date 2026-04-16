@@ -769,7 +769,7 @@ static int ggml_backend_sched_backend_from_buffer(ggml_backend_sched_t sched, co
 
 #ifndef NDEBUG
     GGML_LOG_DEBUG("%s: warning: no backend supports op %s with a weight with buffer type %s used in tensor %s, the weight will need to be copied\n",
-        __func__, ggml_op_desc(tensor), ggml_backend_buffer_name(buffer), tensor->name);
+        __func__, ggml_op_desc(op), ggml_backend_buffer_name(buffer), tensor->name);
 #endif
 
     return -1;
