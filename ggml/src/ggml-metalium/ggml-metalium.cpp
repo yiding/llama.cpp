@@ -238,61 +238,44 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
     const struct ggml_tensor * src1 = dst->src[1];
     bool can_be_processed_by_ttnn = src0->ne[0] == src1->ne[0] && src0->ne[2] == 1 && src1->ne[2] == 1 &&
         (src0->ne[3] == src1->ne[3] || src0->ne[3] == 1);
-    bool awkward_gemv = src1->ne[0] == 1; // HACK: the custom MUL_MAT kernel needs to have masking support
+    GGML_ASSERT(can_be_processed_by_ttnn);
 
-    if(can_be_processed_by_ttnn && (g_debug_flags.cache_mm_transpose || awkward_gemv)) {
-        GGML_TENSOR_BINARY_OP_LOCALS
+    GGML_TENSOR_BINARY_OP_LOCALS
 
-        const enum ggml_type type = src0->type;
+    const enum ggml_type type = src0->type;
 
-        GGML_ASSERT(ne0 == ne01);
-        GGML_ASSERT(ne1 == ne11);
-        GGML_ASSERT(ne2 == ne12);
-        GGML_ASSERT(ne3 == ne13);
+    GGML_ASSERT(ne0 == ne01);
+    GGML_ASSERT(ne1 == ne11);
+    GGML_ASSERT(ne2 == ne12);
+    GGML_ASSERT(ne3 == ne13);
 
-        // we don't support permuted src0 or src1
-        GGML_ASSERT(nb00 == ggml_type_size(type));
-        GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+    // we don't support permuted src0 or src1
+    GGML_ASSERT(nb00 == ggml_type_size(type));
+    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
 
-        // dst cannot be transposed or permuted
-        GGML_ASSERT(nb0 == sizeof(float));
-        GGML_ASSERT(nb0 <= nb1);
-        GGML_ASSERT(nb1 <= nb2);
-        GGML_ASSERT(nb2 <= nb3);
+    // dst cannot be transposed or permuted
+    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1);
+    GGML_ASSERT(nb1 <= nb2);
+    GGML_ASSERT(nb2 <= nb3);
 
-        auto ap = realize_ggml_view(src0);
-        auto bp = realize_ggml_view(src1);
-        auto &a = *ap;
-        auto &b = *bp;
+    auto ap = realize_ggml_view(src0);
+    auto bp = realize_ggml_view(src1);
+    auto &a = *ap;
+    auto &b = *bp;
 
-        *dst_meta = {
-            .tensor = std::make_shared<tt::tt_metal::Tensor>(ttnn::operations::matmul::matmul(
-                /*input_tensor_a=*/ b,
-                /*input_tensor_b=*/ a,
-                /*transpose_a=*/ false,
-                /*transpose_b=*/ true,
-                /*memory_config=*/ std::nullopt,
-                /*dtype=*/ std::nullopt,
-                /*program_config=*/ std::nullopt,
-                /*activation=*/ std::nullopt,
-                /*compute_kernel_config=*/ make_compute_kernel_config(a.device()))),
-        };
-    }
-    else {
-#if 0
-        // Our slow implementation of MUL_MAT using direct kernels
-        uint32_t prec = dst->op_params[0];
-        bool high_percision = prec == GGML_PREC_F32;
-
-        auto res = ttggml::mul_mat(*realize_ggml_view(dst->src[0]), *realize_ggml_view(dst->src[1]), high_percision);
-
-        *dst_meta = ggml_tensor_extra_metalium{
-            .tensor = std::make_shared<tt::tt_metal::Tensor>(res),
-        };
-#else
-        GGML_ABORT("unsupported matmul");
-#endif
-    }
+    *dst_meta = {
+        .tensor = std::make_shared<tt::tt_metal::Tensor>(ttnn::operations::matmul::matmul(
+            /*input_tensor_a=*/ b,
+            /*input_tensor_b=*/ a,
+            /*transpose_a=*/ false,
+            /*transpose_b=*/ true,
+            /*memory_config=*/ std::nullopt,
+            /*dtype=*/ std::nullopt,
+            /*program_config=*/ std::nullopt,
+            /*activation=*/ std::nullopt,
+            /*compute_kernel_config=*/ make_compute_kernel_config(a.device()))),
+    };
     GGML_ASSERT(dst_meta->tensor->storage_type() == tt::tt_metal::StorageType::DEVICE);
 }
 

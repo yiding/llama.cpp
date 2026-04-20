@@ -289,8 +289,22 @@ add_executable(${TEST_TARGET} test-c.c)
 target_link_libraries(${TEST_TARGET} PRIVATE llama)
 
 if (GGML_METALIUM)
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
+    )
+    FetchContent_MakeAvailable(googletest)
     llama_build_and_test(test-metalium.cpp)
+    target_link_libraries(
+      test-metalium
+      PRIVATE
+      GTest::gtest_main
+    )
+    include(GoogleTest)
+    gtest_discover_tests(test-metalium)
 endif()
+
 llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
