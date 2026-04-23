@@ -1,12 +1,11 @@
 #pragma once
 
-#include "ggml.h"
 #include "ggml-backend.h"
+#include "ggml.h"
 
 // GGML backend for using Tenstorrent's tt-Metalium and TTNN libraries
 
-
-#ifdef  __cplusplus
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -18,6 +17,6 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_metalium_buffer_type(in
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg();
 
-#ifdef  __cplusplus
+#ifdef __cplusplus
 }
 #endif
