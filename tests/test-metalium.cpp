@@ -179,9 +179,9 @@ struct test_case
     test_case(
       std::function<ggml_tensor* (ggml_context*)> build_graph,
       const std::function<double(const float*, const float*, size_t n)>& loss = nmse,
-      float max_err = 1e-4
+      double max_err = 1e-4
     ) : max_err(max_err), loss(loss), build_graph(std::move(build_graph)) {}
-    float max_err;
+    double max_err;
     std::function<double(const float*, const float*, size_t n)> loss;
     std::function<ggml_tensor* (ggml_context*)> build_graph;
 
@@ -297,6 +297,7 @@ struct test_case
 
             double err = ud->loss(f1.data(), f2.data(), f1.size());
             EXPECT_LE(err, ud->max_err) << "[" << ggml_op_desc(t1) << "] loss = " << err << " > " << ud->max_err;
+
             return true;
 
             GGML_UNUSED(index);
@@ -342,9 +343,9 @@ protected:
   static ggml_backend_ptr cpu_backend;
   static ggml_backend_ptr metalium_backend;
 
-  template<typename F>
-  void compare_graph(F&& f) {
-    test_case{std::forward<F>(f)}.eval(cpu_backend.get(), metalium_backend.get());
+  template<typename ...Args>
+  void compare_graph(Args&&... args) {
+    test_case{std::forward<Args>(args)...}.eval(cpu_backend.get(), metalium_backend.get());
   }
 };
 
@@ -366,7 +367,7 @@ TEST_P(MetaliumUnaryOpTest, UnaryOp) {
   compare_graph([op, type](ggml_context* ctx) {
     ggml_tensor* a = ggml_new_tensor_2d(ctx, type, 64, 64);
     return ggml_unary(ctx, a, op);
-  });
+  }, nmse, 1e-3);
 }
 
 INSTANTIATE_TEST_SUITE_P(

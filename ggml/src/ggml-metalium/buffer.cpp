@@ -519,7 +519,7 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
         //      Which means if we try to copy a transposed tensor. We should not transpose it. Else the other
         //      backend would transpose it again.
         ggml_tensor* src = tensor->src[0];
-        bool do_transpose = true;
+        bool do_transpose = false;
         while(src->op == GGML_OP_TRANSPOSE) {
             do_transpose = !do_transpose;
             src = src->src[0];
@@ -530,15 +530,13 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
         if(do_transpose) {
             *t = ttnn::transpose(*t, -2, -1);
         }
-    }
-    else if (tensor->op == GGML_OP_PERMUTE) {
+    } else if (tensor->op == GGML_OP_PERMUTE) {
         // DITTO above.
         // XXX: This only handles the case where the permute is the only view class operation
         // May broke if there are multiple permutes
         ggml_tensor* src = tensor->src[0];
         t = realize_ggml_view(src);
-    }
-    else if (tensor->op == GGML_OP_RESHAPE) {
+    } else if (tensor->op == GGML_OP_RESHAPE) {
         // No reason to do actual reshaping as it doesn't make a difference in row-major layout
         ggml_tensor* src = tensor->src[0];
         while(src->op == GGML_OP_RESHAPE) {
@@ -547,11 +545,11 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
         }
         GGML_ASSERT(src != NULL);
         t = realize_ggml_view(src);
-    }
-    else {
+    } else {
         t = realize_ggml_view(tensor);
         GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, *t));
     }
+
     if(t->dtype() != tt::tt_metal::DataType::BFLOAT16 && t->dtype() != tt::tt_metal::DataType::FLOAT32 && t->dtype() != tt::tt_metal::DataType::UINT32) {
         t = std::make_shared<tt::tt_metal::Tensor>(ttnn::typecast(*t, tt::tt_metal::DataType::BFLOAT16));
     }
