@@ -367,7 +367,8 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     ggml_tensor_extra_metalium * meta   = (ggml_tensor_extra_metalium *) tensor->extra;
 
     // Make sure we are not writing to a view tensor
-    if (size != ggml_nbytes(tensor) || (meta->tensor && ggml_tt_tensors_shape_equal(tensor, *meta->tensor) == false) ||
+    if (size != ggml_nbytes(tensor) ||
+        (meta->tensor.tensor_attributes && ggml_tt_tensors_shape_equal(tensor, meta->tensor) == false) ||
         tensor->view_src != NULL) {
         // FIXME: Reenable this when got time
         // fprintf(stderr, "Warning: Metalium set_tensor() does not work with tensor views\n");
@@ -461,7 +462,7 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, t));
     GGML_ASSERT(t.layout() == (tilize ? tt::tt_metal::Layout::TILE : tt::tt_metal::Layout::ROW_MAJOR));
     *meta = ggml_tensor_extra_metalium{
-        .tensor = std::make_shared<tt::tt_metal::Tensor>(std::move(t)),
+        .tensor = std::move(t),
     };
 }
 
@@ -489,7 +490,7 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
     // std::cout << "get_tensor():\n";
     // std::cout << "  GGML thinks shape: " << tensor->ne[0] << " " << tensor->ne[1] << " " << tensor->ne[2] << " " << tensor->ne[3] << std::endl;
     // std::cout << "  TTNN thinks shape: " << shape << std::endl;
-    std::shared_ptr<tt::tt_metal::Tensor> t;
+    tt::tt_metal::Tensor t;
     if (tensor->op == GGML_OP_TRANSPOSE) {
         // std::cout << "Reading out to transpose tensor" << std::endl;
         // HACK: Yeah this one is stupid. GGML as a row-major framework uses lazy evaluation for transpose.
@@ -505,7 +506,7 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
         GGML_ASSERT(src != NULL);
         t = realize_ggml_view(src);
         if (do_transpose) {
-            *t = ttnn::transpose(*t, -2, -1);
+            t = ttnn::transpose(t, -2, -1);
         }
     } else if (tensor->op == GGML_OP_PERMUTE) {
         // DITTO above.
@@ -524,25 +525,25 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
         t = realize_ggml_view(src);
     } else {
         t = realize_ggml_view(tensor);
-        GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, *t));
+        GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, t));
     }
 
-    if (t->dtype() != tt::tt_metal::DataType::BFLOAT16 && t->dtype() != tt::tt_metal::DataType::FLOAT32 &&
-        t->dtype() != tt::tt_metal::DataType::UINT32) {
-        t = std::make_shared<tt::tt_metal::Tensor>(ttnn::typecast(*t, tt::tt_metal::DataType::BFLOAT16));
+    if (t.dtype() != tt::tt_metal::DataType::BFLOAT16 && t.dtype() != tt::tt_metal::DataType::FLOAT32 &&
+        t.dtype() != tt::tt_metal::DataType::UINT32) {
+        t = ttnn::typecast(t, tt::tt_metal::DataType::BFLOAT16);
     }
 
     // TODO: Proper handling of data types
     GGML_ASSERT(dst_ggtype != GGML_TYPE_F64 && dst_ggtype != GGML_TYPE_I16 && dst_ggtype != GGML_TYPE_I8);
-    switch (t->dtype()) {
+    switch (t.dtype()) {
         case tt::tt_metal::DataType::BFLOAT16:
-            copy_tt_tensor_to_host_pointer<bfloat16>(*t, (float *) data, dst_ggtype);
+            copy_tt_tensor_to_host_pointer<bfloat16>(t, (float *) data, dst_ggtype);
             break;
         case tt::tt_metal::DataType::FLOAT32:
-            copy_tt_tensor_to_host_pointer<float>(*t, (float *) data, dst_ggtype);
+            copy_tt_tensor_to_host_pointer<float>(t, (float *) data, dst_ggtype);
             break;
         case tt::tt_metal::DataType::UINT32:
-            copy_tt_tensor_to_host_pointer<uint32_t>(*t, (int *) data, dst_ggtype);
+            copy_tt_tensor_to_host_pointer<uint32_t>(t, (int *) data, dst_ggtype);
             break;
         default:
             GGML_ASSERT(false && "Unsupported data type in TT tensor when converting to GGML tensor");
@@ -569,11 +570,11 @@ static bool ggml_backend_metalium_buffer_cpy_tensor(ggml_backend_buffer_t buffer
     ggml_tensor_extra_metalium * src_meta = (ggml_tensor_extra_metalium *) src->extra;
     ggml_tensor_extra_metalium * dst_meta = (ggml_tensor_extra_metalium *) dst->extra;
 
-    tt::tt_metal::Tensor & src_tensor = *src_meta->tensor;
+    const tt::tt_metal::Tensor & src_tensor = src_meta->tensor;
 
     tt::tt_metal::Tensor ret = ttnn::identity(src_tensor);
     GGML_ASSERT(ret.storage_type() == tt::tt_metal::StorageType::DEVICE);
-    dst_meta->tensor = std::make_shared<tt::tt_metal::Tensor>(std::move(ret));
+    dst_meta->tensor = std::move(ret);
     return true;
 }
 
@@ -585,9 +586,7 @@ static void ggml_backend_metalium_buffer_reset(ggml_backend_buffer_t buffer) {
 static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     ggml_backend_metalium_buffer_context * bufctx = (ggml_backend_metalium_buffer_context *) buffer->context;
 
-    bufctx->metadata_to_free.push_back(std::make_unique<ggml_tensor_extra_metalium>(ggml_tensor_extra_metalium{
-        .tensor = nullptr,
-    }));
+    bufctx->metadata_to_free.push_back(std::make_unique<ggml_tensor_extra_metalium>());
     ggml_tensor_extra_metalium * meta = bufctx->metadata_to_free.back().get();
     tensor->extra                     = meta;
 
@@ -601,7 +600,7 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
         auto t       = ttnn::zeros(ttnn::Shape(shape), ggml2tt_type(tensor->type, bufctx->device->arch()),
                                    tt::tt_metal::Layout::ROW_MAJOR);
         t            = ttnn::tilize_with_zero_padding(t.to_device(bufctx->device.get()));
-        meta->tensor = std::make_shared<tt::tt_metal::Tensor>(std::move(t));
+        meta->tensor = std::move(t);
     }
     // std::cout << "Creating tensor with address: " << tensor->data << ", shape = " << tensor->ne[0] << " " << tensor->ne[1] << " " << tensor->ne[2] << " " << tensor->ne[3] << ", name " << tensor->name << std::endl;
     return GGML_STATUS_SUCCESS;

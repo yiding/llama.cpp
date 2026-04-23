@@ -33,7 +33,7 @@ tt::tt_metal::DataType ggml2tt_type(ggml_type ggtype, tt::ARCH arch);
 bool is_ggml_type_supported_by_metalium(ggml_type ggtype, tt::ARCH arch);
 
 bool is_view(const ggml_tensor* tensor);
-std::shared_ptr<tt::tt_metal::Tensor> realize_ggml_view(const ggml_tensor* tensor);
+tt::tt_metal::Tensor realize_ggml_view(const ggml_tensor* tensor);
 tt::tt_metal::Tensor reshape_tt_tensor_into_ggml(const tt::tt_metal::Tensor& tensor, const struct ggml_tensor * node);
 
 // Debug flags that can be enabled at runtime. Because recompiling the backend takes forever

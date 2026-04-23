@@ -9,7 +9,7 @@
 namespace ggml_backend_metalium {
 
 struct ggml_tensor_extra_metalium {
-    std::shared_ptr<tt::tt_metal::Tensor> tensor;
+    tt::tt_metal::Tensor tensor;
     bool is_pretransposed = false;
 };
 
