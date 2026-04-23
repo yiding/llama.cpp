@@ -329,6 +329,12 @@ void copy_tt_tensor_to_host_pointer(const tt::tt_metal::Tensor & tensor, void * 
 
 namespace ggml_backend_metalium {
 
+static void ggml_backend_metalium_buffer_free_buffer(ggml_backend_buffer_t buffer);
+
+static bool ggml_backend_buffer_is_metalium(ggml_backend_buffer_t buffer) {
+    return buffer->iface.free_buffer == ggml_backend_metalium_buffer_free_buffer;
+}
+
 static void ggml_backend_metalium_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     ggml_backend_metalium_buffer_context * ctx = (ggml_backend_metalium_buffer_context *) buffer->context;
     delete ctx;
@@ -555,8 +561,10 @@ static bool ggml_backend_metalium_buffer_cpy_tensor(ggml_backend_buffer_t buffer
                                                     ggml_tensor *         dst) {
     GGML_UNUSED(buffer);
 
-    GGML_ASSERT(src->extra != NULL);
-    GGML_ASSERT(dst->extra != NULL);
+    if (!ggml_backend_buffer_is_metalium(src->buffer)) {
+        return false;
+    }
+    GGML_ASSERT(dst->extra != nullptr);
 
     ggml_tensor_extra_metalium * src_meta = (ggml_tensor_extra_metalium *) src->extra;
     ggml_tensor_extra_metalium * dst_meta = (ggml_tensor_extra_metalium *) dst->extra;
