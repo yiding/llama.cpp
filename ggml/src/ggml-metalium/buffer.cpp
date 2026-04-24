@@ -364,11 +364,11 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     ggml_backend_metalium_buffer_context * bufctx = (ggml_backend_metalium_buffer_context *) buffer->context;
     GGML_ASSERT(bufctx != NULL);
     ggml_type                    ggtype = tensor->type;
-    ggml_tensor_extra_metalium * meta   = (ggml_tensor_extra_metalium *) tensor->extra;
+    tt::tt_metal::Tensor & tt_tensor = get_tt_tensor(tensor);
 
     // Make sure we are not writing to a view tensor
     if (size != ggml_nbytes(tensor) ||
-        (meta->tensor.tensor_attributes && ggml_tt_tensors_shape_equal(tensor, meta->tensor) == false) ||
+        (tt_tensor.tensor_attributes && ggml_tt_tensors_shape_equal(tensor, tt_tensor) == false) ||
         tensor->view_src != NULL) {
         // FIXME: Reenable this when got time
         // fprintf(stderr, "Warning: Metalium set_tensor() does not work with tensor views\n");
@@ -461,9 +461,7 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     GGML_ASSERT(t.dtype() == final_type);
     GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, t));
     GGML_ASSERT(t.layout() == (tilize ? tt::tt_metal::Layout::TILE : tt::tt_metal::Layout::ROW_MAJOR));
-    *meta = ggml_tensor_extra_metalium{
-        .tensor = std::move(t),
-    };
+    tt_tensor = std::move(t);
 }
 
 static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer,
@@ -567,14 +565,11 @@ static bool ggml_backend_metalium_buffer_cpy_tensor(ggml_backend_buffer_t buffer
     }
     GGML_ASSERT(dst->extra != nullptr);
 
-    ggml_tensor_extra_metalium * src_meta = (ggml_tensor_extra_metalium *) src->extra;
-    ggml_tensor_extra_metalium * dst_meta = (ggml_tensor_extra_metalium *) dst->extra;
-
-    const tt::tt_metal::Tensor & src_tensor = src_meta->tensor;
+    const tt::tt_metal::Tensor & src_tensor = get_tt_tensor(src);
 
     tt::tt_metal::Tensor ret = ttnn::identity(src_tensor);
     GGML_ASSERT(ret.storage_type() == tt::tt_metal::StorageType::DEVICE);
-    dst_meta->tensor = std::move(ret);
+    get_tt_tensor(dst) = std::move(ret);
     return true;
 }
 
@@ -586,9 +581,9 @@ static void ggml_backend_metalium_buffer_reset(ggml_backend_buffer_t buffer) {
 static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     ggml_backend_metalium_buffer_context * bufctx = (ggml_backend_metalium_buffer_context *) buffer->context;
 
-    bufctx->metadata_to_free.push_back(std::make_unique<ggml_tensor_extra_metalium>());
-    ggml_tensor_extra_metalium * meta = bufctx->metadata_to_free.back().get();
-    tensor->extra                     = meta;
+    bufctx->metadata_to_free.push_back(std::make_unique<tensor_extra>());
+    tensor_extra * meta = bufctx->metadata_to_free.back().get();
+    tensor->extra = meta;
 
     // HACK: Make KV cache work. They don't get set before first use
     // TODO: Most likely we'd want to refer this allocation to first time use of the tensor to support proper KV cache setup
@@ -604,6 +599,16 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
     }
     // std::cout << "Creating tensor with address: " << tensor->data << ", shape = " << tensor->ne[0] << " " << tensor->ne[1] << " " << tensor->ne[2] << " " << tensor->ne[3] << ", name " << tensor->name << std::endl;
     return GGML_STATUS_SUCCESS;
+}
+
+const tt::tt_metal::Tensor& get_tt_tensor(const ggml_tensor * tensor) {
+    GGML_ASSERT(ggml_backend_buffer_is_metalium(tensor->buffer));
+    return static_cast<const tensor_extra *>(tensor->extra)->tensor;
+}
+
+tt::tt_metal::Tensor& get_tt_tensor(ggml_tensor * tensor) {
+    GGML_ASSERT(ggml_backend_buffer_is_metalium(tensor->buffer));
+    return static_cast<tensor_extra *>(tensor->extra)->tensor;
 }
 
 struct ggml_backend_buffer_i ggml_backend_metalium_buffer_interface = {

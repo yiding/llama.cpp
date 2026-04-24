@@ -8,10 +8,13 @@
 
 namespace ggml_backend_metalium {
 
-struct ggml_tensor_extra_metalium {
+struct tensor_extra {
     tt::tt_metal::Tensor tensor;
-    bool is_pretransposed = false;
 };
+
+const tt::tt_metal::Tensor& get_tt_tensor(const ggml_tensor * tensor);
+tt::tt_metal::Tensor& get_tt_tensor(ggml_tensor * tensor);
+
 
 struct ggml_backend_metalium_buffer_context {
     size_t ggml_buffer_size_bytes = 0;
@@ -20,7 +23,7 @@ struct ggml_backend_metalium_buffer_context {
     size_t base_offset = 0;
 
     // Tracking our own allocations because Metalium limitations and GGML assuming them
-    std::vector<std::unique_ptr<ggml_tensor_extra_metalium>> metadata_to_free;
+    std::vector<std::unique_ptr<tensor_extra>> metadata_to_free;
 };
 
 extern struct ggml_backend_buffer_i ggml_backend_metalium_buffer_interface;

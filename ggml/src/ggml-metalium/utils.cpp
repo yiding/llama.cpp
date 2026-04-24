@@ -291,10 +291,10 @@ tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
                       << tensor->nb[3] << "\n";
             std::cout << "  dst extra: " << tensor->extra << "\n";
             if (tensor->extra != nullptr) {
-                ggml_tensor_extra_metalium * meta = (ggml_tensor_extra_metalium *) tensor->extra;
-                std::cout << "  dst tensor: " << meta->tensor << "\n";
-                if (meta->tensor.tensor_attributes) {
-                    std::cout << "  dst tensor shape: " << meta->tensor.logical_shape() << "\n";
+                const auto & tt_tensor = get_tt_tensor(tensor);
+                std::cout << "  dst tensor: " << tt_tensor << "\n";
+                if (tt_tensor.tensor_attributes) {
+                    std::cout << "  dst tensor shape: " << tt_tensor.logical_shape() << "\n";
                 }
             }
             std::cout << "  dst data: " << tensor->data << "\n";
@@ -379,10 +379,9 @@ tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
         return ttnn::permute(t, permute_tt_real);
     }
 
-    ggml_tensor_extra_metalium * meta = (ggml_tensor_extra_metalium *) tensor->extra;
-    GGML_ASSERT(meta != nullptr);
-    if (meta != nullptr && meta->tensor.tensor_attributes) {
-        return meta->tensor;
+    const auto &tt_tensor = get_tt_tensor(tensor);
+    if (tt_tensor.tensor_attributes) {
+        return tt_tensor;
     }
 
     if (is_view(tensor) && tensor->view_src != nullptr) {
@@ -404,9 +403,8 @@ tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
 
 tt::tt_metal::Tensor realize_ggml_view(const ggml_tensor * tensor) {
     auto                         res  = realize_ggml_view_impl(tensor);
-    ggml_tensor_extra_metalium * meta = static_cast<ggml_tensor_extra_metalium *>(tensor->extra);
     // We hack around weight transposed issue that maeks this test fail. But the performance gain is worth the inconsistency
-    if (!ggml_tt_tensors_shape_equal(tensor, res) && !meta->is_pretransposed) {
+    if (!ggml_tt_tensors_shape_equal(tensor, res)) {
         std::cout << "FATAL ERROR: Shape mismatch between TTNN and GGML after view op " << ggml_op_name(tensor->op)
                   << "\n"
                   << "  Result: " << res.logical_shape() << "\n"
