@@ -294,8 +294,11 @@ struct test_case {
                 }
             }
 
-            double err = ud->loss(f1.data(), f2.data(), f1.size());
-            EXPECT_LE(err, ud->max_err) << "[" << ggml_op_desc(t1) << "] loss = " << err << " > " << ud->max_err;
+            if (!f1.empty()) {
+              // loss is undefined if there's no elements
+              double err = ud->loss(f1.data(), f2.data(), f1.size());
+              EXPECT_LE(err, ud->max_err) << "[" << ggml_op_desc(t1) << "] loss = " << err << " > " << ud->max_err;
+            }
 
             return true;
 
@@ -676,6 +679,14 @@ TEST_F(MetaliumTest, Set_row_of_2D_matrix_with_offset) {
         ggml_tensor * b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 32);
         return ggml_set_2d(ctx, a, b, b->nb[1], a->nb[1]);
     });
+}
+
+TEST_F(MetaliumTest, Matrix_multiplication_with_empty_dim) {
+  compare_graph([](ggml_context * ctx) {
+      ggml_tensor * a = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 32, 64, 1, 1);
+      ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 32, 0, 1, 1);
+      return ggml_mul_mat(ctx, a, b);
+  });
 }
 
 TEST_F(MetaliumTest, Matrix_multiplication_2D) {

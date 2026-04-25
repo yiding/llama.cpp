@@ -49,4 +49,6 @@ struct ggml_backend_metalium_debug_flags {
 
 extern const ggml_backend_metalium_debug_flags g_debug_flags;
 
+tt::tt_metal::Shape tt_shape_of(const ggml_tensor* ggtensor);
+
 } // namespace ggml_backend_metalium

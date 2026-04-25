@@ -1,6 +1,7 @@
 #include "utils.hpp"
 
 #include "buffer.hpp"
+#include "ggml.h"
 
 #include <filesystem>
 #include <unordered_map>
@@ -456,5 +457,13 @@ const ggml_backend_metalium_debug_flags g_debug_flags = []() {
         .experimental_ops      = parse_env("GGML_METALIUM_EXPERIMENTAL_OPS")
     };
 }();
+
+tt::tt_metal::Shape tt_shape_of(const ggml_tensor* ggtensor) {
+  Shape::Container dims;
+  for (int i = 0; i < GGML_MAX_DIMS; i++) {
+    dims.push_back(ggtensor->ne[GGML_MAX_DIMS - i - 1]);
+  }
+  return tt::tt_metal::Shape(dims);
+}
 
 }  // namespace ggml_backend_metalium

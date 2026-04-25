@@ -378,7 +378,6 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     std::optional<tt::tt_metal::HostBuffer> storage;
     tt::tt_metal::DataType                  intermidiate_type = tt::tt_metal::DataType::BFLOAT16;
     bool                                    tilize            = true;
-    std::cout << "set_tensor: " << tensor->name << " ggtype: " << ggtype << std::endl;
     if (ggtype == GGML_TYPE_F32) {
         // For now we cast F32 to BF16. Need a scalable way to handle this as WORMHOLD_B0 have native support for F32
         // TODO: Enable proper FP32 when all related bugs gets fixed for devices that support it
@@ -585,14 +584,24 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
     tensor_extra * meta = bufctx->metadata_to_free.back().get();
     tensor->extra = meta;
 
+    bool needs_init = false;
+
+    // As an optimization, ggml does not call tensor_set for 0-sized tensors, so
+    // we initialize the tt tensor here for 0 sized tensors.
+    // TODO(yiding): we should probably just allocate all the time in init, and
+    // ensure operations that write to this tensor use existing allocated tensor.
+    needs_init |= ggml_nbytes(tensor) == 0;
+
     // HACK: Make KV cache work. They don't get set before first use
     // TODO: Most likely we'd want to refer this allocation to first time use of the tensor to support proper KV cache setup
     //       as the "real" shape information (GGML allocates KV cache as a very long 1D tensor) is missing here
     std::string_view name(tensor->name);
-    if (std::string_view(name).find("cache") != std::string::npos && tensor->op == GGML_OP_NONE) {
+    needs_init |= (std::string_view(name).find("cache") != std::string::npos && tensor->op == GGML_OP_NONE);
+
+    if (needs_init) {
         std::vector<uint32_t> shape(tensor->ne, tensor->ne + GGML_MAX_DIMS);
         std::reverse(shape.begin(), shape.end());
-        auto t       = ttnn::zeros(ttnn::Shape(shape), ggml2tt_type(tensor->type, bufctx->device->arch()),
+        auto t       = ttnn::zeros(tt_shape_of(tensor), ggml2tt_type(tensor->type, bufctx->device->arch()),
                                    tt::tt_metal::Layout::ROW_MAJOR);
         t            = ttnn::tilize_with_zero_padding(t.to_device(bufctx->device.get()));
         meta->tensor = std::move(t);

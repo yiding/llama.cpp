@@ -72,7 +72,7 @@ namespace ggml_backend_metalium {
 namespace {
 
 struct ggml_backend_metalium_context {
-    ttnn::IDevice * device    = nullptr;
+    ttnn::MeshDevice * device    = nullptr;
     int             device_id = 0;
     std::string     name;
 };
@@ -236,6 +236,17 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
     GGML_ASSERT(can_be_processed_by_ttnn);
 
     GGML_TENSOR_BINARY_OP_LOCALS
+
+    // Sometimes ggml gives a 0-element tensor, for that we just emit an empty
+    // tensor of the correct shape.
+    if (ggml_nelements(dst) == 0) {
+      get_tt_tensor(dst) = ttnn::zeros(
+        tt_shape_of(dst),
+        ggml2tt_type(dst->type, ctx->device->arch()),
+        tt::tt_metal::Layout::TILE,
+        *ctx->device);
+      return;
+    }
 
     const enum ggml_type type = src0->type;
 
@@ -1343,11 +1354,6 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
     for (int i = 0; i < cgraph->n_nodes; i++) {
         struct ggml_tensor * node = cgraph->nodes[i];
 
-        // std::cout << "Graph compute " << ggml_op_desc(node) << "\n"
-        //     << "  dst addr: " << node->data << "\n"
-        //     << "  src0 addr: " << (void*)(node->src[0] ? node->src[0]->data : 0) << "\n"
-        //     << "  src1 addr: " << (void*)(node->src[1] ? node->src[1]->data : 0) << "\n";
-
         // Bypass post conition checks for these ops because they are evaluated lazily
         if (node->op == GGML_OP_VIEW || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_RESHAPE ||
             node->op == GGML_OP_PERMUTE) {
@@ -1726,7 +1732,7 @@ static ggml_guid_t ggml_backend_metalium_guid(void) {
 
 static ggml_backend_t ggml_backend_metalium_init(ggml_backend_metalium_device_context * dev_ctx) {
     int             device_id = dev_ctx->device_id;
-    ttnn::IDevice * device    = dev_ctx->device.get();
+    ttnn::MeshDevice* device    = dev_ctx->device.get();
     GGML_ASSERT(device_id >= 0 && (size_t) device_id < tt::tt_metal::GetNumAvailableDevices());
     GGML_ASSERT(device != nullptr);
 
