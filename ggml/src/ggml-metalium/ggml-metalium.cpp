@@ -73,8 +73,8 @@ namespace {
 
 struct ggml_backend_metalium_context {
     ttnn::MeshDevice * device    = nullptr;
-    int             device_id = 0;
-    std::string     name;
+    int                device_id = 0;
+    std::string        name;
 };
 
 struct ggml_backend_metalium_device_context {
@@ -202,24 +202,20 @@ static bool ggml_backend_metalium_can_mul_mat(const struct ggml_tensor * dst) {
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
 
-    // TTNN only supports matmul of shape [B, 1, M, K] x [1, 1, K, N] (bcast_batch=True)
-    // or [B, 1, M, K] x [B, 1, K, N] (bcast_batch=False)
-    // For now we simply only allow those shapes. We transpose the shapes ourselves
-    // TODO: Detect when shape[1] can be removed and do that automagically
-    bool can_be_processed_by_ttnn = src0->ne[0] == src1->ne[0] && src0->ne[2] == 1 && src1->ne[2] == 1 &&
-                                    (src0->ne[3] == src1->ne[3] || src0->ne[3] == 1);
-    if (can_be_processed_by_ttnn) {
-        return true;
-    }
-
-    // Our own slow implementation
-    if (!(src0->ne[0] == src1->ne[0] && src1->ne[2] % src0->ne[2] == 0 && src1->ne[3] % src0->ne[3] == 0 &&
-          src1->ne[2] != 0 && src1->ne[3] != 0)) {
+    // no permuted.
+    if (ggml_is_permuted(src0) || ggml_is_permuted(src1)) {
         return false;
     }
 
-    // we will perform a transpose which is not supported on quantized types for now
-    return (!is_view(src0) || !ggml_is_quantized(src0->type)) && (!is_view(src1) || !ggml_is_quantized(src1->type));
+    bool can_mul_mat = false;
+
+    // Same batch dims.
+    can_mul_mat |= (src0->ne[2] == src1->ne[2] && src0->ne[3] == src1->ne[3]);
+
+    // First mat has batch dims of 1.
+    can_mul_mat |= (src0->ne[2] == 1 && src0->ne[3] == 1);
+
+    return can_mul_mat;
 }
 
 static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, struct ggml_tensor * dst) {
@@ -231,21 +227,18 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
 
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
-    bool can_be_processed_by_ttnn   = src0->ne[0] == src1->ne[0] && src0->ne[2] == 1 && src1->ne[2] == 1 &&
-                                      (src0->ne[3] == src1->ne[3] || src0->ne[3] == 1);
-    GGML_ASSERT(can_be_processed_by_ttnn);
+    // bool can_be_processed_by_ttnn   = src0->ne[0] == src1->ne[0] && src0->ne[2] == 1 && src1->ne[2] == 1 &&
+    //                                   (src0->ne[3] == src1->ne[3] || src0->ne[3] == 1);
+    // GGML_ASSERT(can_be_processed_by_ttnn);
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
     // Sometimes ggml gives a 0-element tensor, for that we just emit an empty
     // tensor of the correct shape.
     if (ggml_nelements(dst) == 0) {
-      get_tt_tensor(dst) = ttnn::zeros(
-        tt_shape_of(dst),
-        ggml2tt_type(dst->type, ctx->device->arch()),
-        tt::tt_metal::Layout::TILE,
-        *ctx->device);
-      return;
+        get_tt_tensor(dst) = ttnn::zeros(tt_shape_of(dst), ggml2tt_type(dst->type, ctx->device->arch()),
+                                         tt::tt_metal::Layout::TILE, *ctx->device);
+        return;
     }
 
     const enum ggml_type type = src0->type;
@@ -1731,8 +1724,8 @@ static ggml_guid_t ggml_backend_metalium_guid(void) {
 }
 
 static ggml_backend_t ggml_backend_metalium_init(ggml_backend_metalium_device_context * dev_ctx) {
-    int             device_id = dev_ctx->device_id;
-    ttnn::MeshDevice* device    = dev_ctx->device.get();
+    int                device_id = dev_ctx->device_id;
+    ttnn::MeshDevice * device    = dev_ctx->device.get();
     GGML_ASSERT(device_id >= 0 && (size_t) device_id < tt::tt_metal::GetNumAvailableDevices());
     GGML_ASSERT(device != nullptr);
 
