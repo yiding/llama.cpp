@@ -3,6 +3,8 @@
 #include "buffer.hpp"
 #include "ggml.h"
 
+#include <tt-metalium/buffer.hpp>
+
 #include <filesystem>
 #include <unordered_map>
 
@@ -127,7 +129,14 @@ std::string to_string_precise(float value) {
 }
 
 bool ggml_tt_tensors_shape_equal(const ggml_tensor * ggtensor, const tt::tt_metal::Tensor & ttensor) {
-    const ttnn::Shape & shape = ttensor.logical_shape();
+    tensor_extra * meta = tensor_extra::from(ggtensor);
+    ttnn::Shape shape = ttensor.logical_shape();
+    if (meta->is_pretransposed) {
+        size_t h = shape[-1];
+        size_t w = shape[-2];
+        shape[-1] = w;
+        shape[-2] = h;
+    }
     for (size_t i = 0; i < std::min<size_t>(GGML_MAX_DIMS, shape.size()); i++) {
         if (ggtensor->ne[GGML_MAX_DIMS - i - 1] != shape[i]) {
             return false;
@@ -404,7 +413,7 @@ tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
 
 tt::tt_metal::Tensor realize_ggml_view(const ggml_tensor * tensor) {
     auto                         res  = realize_ggml_view_impl(tensor);
-    // We hack around weight transposed issue that maeks this test fail. But the performance gain is worth the inconsistency
+
     if (!ggml_tt_tensors_shape_equal(tensor, res)) {
         std::cout << "FATAL ERROR: Shape mismatch between TTNN and GGML after view op " << ggml_op_name(tensor->op)
                   << "\n"

@@ -1,7 +1,10 @@
 #include "buffer.hpp"
 
+#include "ggml.h"
+#include "ttnn/types.hpp"
 #include "utils.hpp"
 
+#include <optional>
 #include <ttnn/operations/creation/creation.hpp>
 
 namespace {
@@ -336,12 +339,12 @@ static bool ggml_backend_buffer_is_metalium(ggml_backend_buffer_t buffer) {
 }
 
 static void ggml_backend_metalium_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    ggml_backend_metalium_buffer_context * ctx = (ggml_backend_metalium_buffer_context *) buffer->context;
+    auto * ctx = ggml_backend_metalium_buffer_context::get(buffer);
     delete ctx;
 }
 
 static void * ggml_backend_metalium_buffer_get_base(ggml_backend_buffer_t buffer) {
-    ggml_backend_metalium_buffer_context * ctx = (ggml_backend_metalium_buffer_context *) buffer->context;
+    auto * ctx = ggml_backend_metalium_buffer_context::get(buffer);
     return (uint8_t *) 0xdeadbeef + ctx->base_offset;
 }
 
@@ -361,9 +364,9 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(tensor->extra != NULL);
 
-    ggml_backend_metalium_buffer_context * bufctx = (ggml_backend_metalium_buffer_context *) buffer->context;
+    auto * bufctx = ggml_backend_metalium_buffer_context::get(buffer);
     GGML_ASSERT(bufctx != NULL);
-    ggml_type                    ggtype = tensor->type;
+    ggml_type              ggtype    = tensor->type;
     tt::tt_metal::Tensor & tt_tensor = get_tt_tensor(tensor);
 
     // Make sure we are not writing to a view tensor
@@ -405,12 +408,7 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
     }
     GGML_ASSERT(storage.has_value() && "Failed to convert data to TT storage");
 
-    // Convert GGML shape to TT shape
-    ttsl::SmallVector<uint32_t> shape(GGML_MAX_DIMS, 1);
-    for (int i = 0; i < GGML_MAX_DIMS; i++) {
-        // GGML stores the shape in reverse order
-        shape[i] = tensor->ne[GGML_MAX_DIMS - i - 1];
-    }
+    auto shape = tt_shape_of(tensor);
 
     std::optional<ttsl::SmallVector<int64_t>> permute;
     // In case GGML sent us a non-contiguous tensor, we need to permute it to make it contiguous
@@ -442,6 +440,8 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
         permute = perm;
     }
 
+    auto * ctx = tensor_extra::from(tensor);
+
     tt::tt_metal::Tensor t(std::move(*storage), ttnn::Shape(shape), intermidiate_type, tt::tt_metal::Layout::ROW_MAJOR);
 
     tt::tt_metal::DataType final_type = ggml2tt_type(ggtype, bufctx->device->arch());
@@ -456,10 +456,15 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
         GGML_ASSERT(!permute.has_value() && "Cannot permute tensor without tilizing");
     }
 
+    if (ctx->is_pretransposed) {
+        t = ttnn::transpose(std::move(t), -2, -1);
+    }
+
     GGML_ASSERT(t.storage_type() == tt::tt_metal::StorageType::DEVICE);
     GGML_ASSERT(t.dtype() == final_type);
     GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, t));
     GGML_ASSERT(t.layout() == (tilize ? tt::tt_metal::Layout::TILE : tt::tt_metal::Layout::ROW_MAJOR));
+
     tt_tensor = std::move(t);
 }
 
@@ -525,6 +530,10 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
         GGML_ASSERT(ggml_tt_tensors_shape_equal(tensor, t));
     }
 
+    if (tensor_extra::from(tensor)->is_pretransposed) {
+        t = ttnn::transpose(t, -2, -1);
+    }
+
     if (t.dtype() != tt::tt_metal::DataType::BFLOAT16 && t.dtype() != tt::tt_metal::DataType::FLOAT32 &&
         t.dtype() != tt::tt_metal::DataType::UINT32) {
         t = ttnn::typecast(t, tt::tt_metal::DataType::BFLOAT16);
@@ -573,16 +582,30 @@ static bool ggml_backend_metalium_buffer_cpy_tensor(ggml_backend_buffer_t buffer
 }
 
 static void ggml_backend_metalium_buffer_reset(ggml_backend_buffer_t buffer) {
-    ggml_backend_metalium_buffer_context * bufctx = (ggml_backend_metalium_buffer_context *) buffer->context;
+    auto * bufctx = ggml_backend_metalium_buffer_context::get(buffer);
     bufctx->metadata_to_free.clear();
 }
 
 static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
-    ggml_backend_metalium_buffer_context * bufctx = (ggml_backend_metalium_buffer_context *) buffer->context;
+    using namespace std;
+    using namespace tt::tt_metal;
+
+    auto * bufctx = ggml_backend_metalium_buffer_context::get(buffer);
 
     bufctx->metadata_to_free.push_back(std::make_unique<tensor_extra>());
     tensor_extra * meta = bufctx->metadata_to_free.back().get();
-    tensor->extra = meta;
+    tensor->extra       = meta;
+
+    const auto & shape = tt_shape_of(tensor);
+
+    string_view       name{ tensor->name };
+    static const auto PRETRANSPOSE = { "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight" };
+    if (std::any_of(PRETRANSPOSE.begin(), PRETRANSPOSE.end(),
+                    [&](const char * name_suffix) { return name.find(name_suffix) != string_view::npos; })) {
+        meta->is_pretransposed = true;
+    } else {
+        meta->is_pretransposed = false;
+    }
 
     bool needs_init = false;
 
@@ -595,27 +618,23 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
     // HACK: Make KV cache work. They don't get set before first use
     // TODO: Most likely we'd want to refer this allocation to first time use of the tensor to support proper KV cache setup
     //       as the "real" shape information (GGML allocates KV cache as a very long 1D tensor) is missing here
-    std::string_view name(tensor->name);
-    needs_init |= (std::string_view(name).find("cache") != std::string::npos && tensor->op == GGML_OP_NONE);
+    needs_init |= (name.find("cache") != std::string::npos && tensor->op == GGML_OP_NONE);
 
     if (needs_init) {
-        std::vector<uint32_t> shape(tensor->ne, tensor->ne + GGML_MAX_DIMS);
-        std::reverse(shape.begin(), shape.end());
         auto t       = ttnn::zeros(tt_shape_of(tensor), ggml2tt_type(tensor->type, bufctx->device->arch()),
                                    tt::tt_metal::Layout::ROW_MAJOR);
         t            = ttnn::tilize_with_zero_padding(t.to_device(bufctx->device.get()));
         meta->tensor = std::move(t);
     }
-    // std::cout << "Creating tensor with address: " << tensor->data << ", shape = " << tensor->ne[0] << " " << tensor->ne[1] << " " << tensor->ne[2] << " " << tensor->ne[3] << ", name " << tensor->name << std::endl;
     return GGML_STATUS_SUCCESS;
 }
 
-const tt::tt_metal::Tensor& get_tt_tensor(const ggml_tensor * tensor) {
+const tt::tt_metal::Tensor & get_tt_tensor(const ggml_tensor * tensor) {
     GGML_ASSERT(ggml_backend_buffer_is_metalium(tensor->buffer));
     return static_cast<const tensor_extra *>(tensor->extra)->tensor;
 }
 
-tt::tt_metal::Tensor& get_tt_tensor(ggml_tensor * tensor) {
+tt::tt_metal::Tensor & get_tt_tensor(ggml_tensor * tensor) {
     GGML_ASSERT(ggml_backend_buffer_is_metalium(tensor->buffer));
     return static_cast<tensor_extra *>(tensor->extra)->tensor;
 }

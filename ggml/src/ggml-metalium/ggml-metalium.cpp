@@ -1,6 +1,7 @@
 #include "ggml-metalium.h"
 
 #include "buffer.hpp"
+#include "build_RelWithDebInfo/include/tt_stl/span.hpp"
 #include "fmt/base.h"
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
@@ -10,7 +11,6 @@
 #include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 #include "ttnn/operations/eltwise/binary/binary.hpp"
 #include "ttnn/operations/eltwise/binary/binary_composite.hpp"
-#include "ttnn/operations/eltwise/unary/unary.hpp"
 #include "ttnn/operations/moreh/moreh_group_norm/moreh_group_norm.hpp"
 #include "ttnn/tensor/shape/shape.hpp"
 #include "ttnn/tensor/tensor.hpp"
@@ -266,7 +266,7 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
         /*input_tensor_a=*/b,
         /*input_tensor_b=*/a,
         /*transpose_a=*/false,
-        /*transpose_b=*/true,
+        /*transpose_b=*/!tensor_extra::from(src1)->is_pretransposed,
         /*memory_config=*/std::nullopt,
         /*dtype=*/std::nullopt,
         /*program_config=*/std::nullopt,
@@ -1235,21 +1235,34 @@ static void ggml_backend_metalium_flash_attn(ggml_backend_metalium_context * ctx
     get_tt_tensor(dst) = res;
 }
 
-void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
-                             const ggml_tensor *             ffn_gate,
-                             const ggml_tensor *             ffn_up,
-                             const ggml_tensor *             ffn_glu,
-                             const ggml_tensor *             ffn_down,
-                             ggml_tensor *                   ffn_add) {
-    // Do the ffn ops all at once with a few helpful primitives.
+static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
+                                    const ggml_tensor *             ffn_gate,
+                                    const ggml_tensor *             ffn_up,
+                                    const ggml_tensor *             ffn_glu,
+                                    const ggml_tensor *             ffn_down,
+                                    const ggml_tensor *             ffn_add) {
+    // Check this subgraph is actually what we expect
+    GGML_ASSERT(ffn_gate->src[1] == ffn_up->src[1]);
+    GGML_ASSERT(ffn_glu->src[0] == ffn_gate);
+    GGML_ASSERT(ffn_glu->src[1] == ffn_up);
+    GGML_ASSERT(ffn_down->src[1] == ffn_glu);
+    GGML_ASSERT(ffn_add->src[0] == ffn_down);
+
+    // More useful names.
+    ggml_tensor * hidden_input  = ffn_gate->src[1];
+    ggml_tensor * gate_weight   = ffn_gate->src[0];
+    ggml_tensor * up_weight     = ffn_up->src[0];
+    ggml_tensor * down_weight   = ffn_down->src[0];
+    ggml_tensor * attn_residual = ffn_add->src[1];
 
     if (ggml_nelements(ffn_add) == 0) {  // Handle empty batches.
-        get_tt_tensor(ffn_add) = ttnn::zeros(tt_shape_of(ffn_add), ggml2tt_type(ffn_add->type, ctx->device->arch()),
-                                             tt::tt_metal::Layout::TILE, *ctx->device);
+        tensor_extra::from(ffn_add)->tensor =
+            ttnn::zeros(tt_shape_of(ffn_add), ggml2tt_type(ffn_add->type, ctx->device->arch()),
+                        tt::tt_metal::Layout::TILE, *ctx->device);
         return;
     }
 
-    ttnn::Activation activation;
+    ttnn::operations::unary::UnaryOpType activation;
     switch (ggml_get_glu_op(ffn_glu)) {
         case GGML_GLU_OP_SWIGLU:
             activation = ttnn::operations::unary::UnaryOpType::SILU;
@@ -1264,49 +1277,51 @@ void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
             GGML_ABORT("unsupported GLU op");
     }
 
-    GGML_ASSERT(ffn_gate->src[1] == ffn_up->src[1]);
-    auto hidden = realize_ggml_view(ffn_gate->src[1]);
+    auto hidden_tt = realize_ggml_view(hidden_input);
 
     auto gate_out = ttnn::matmul(
-        /*input_tensor_a=*/hidden,
-        /*input_tensor_b=*/realize_ggml_view(ffn_gate->src[0]),
+        /*input_tensor_a=*/hidden_tt,
+        /*input_tensor_b=*/realize_ggml_view(gate_weight),
         /*transpose_a=*/false,
-        /*transpose_b=*/true,
-        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
+        /*transpose_b=*/!tensor_extra::from(gate_weight)->is_pretransposed,
+        /*memory_config=*/ttnn::L1_WIDTH_SHARDED_MEMORY_CONFIG,
         /*dtype=*/ggml2tt_type(ffn_gate->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
-        /*activation=*/activation,
+        /*activation=*/std::nullopt,
         /*compute_kernel_config=*/make_compute_kernel_config(ctx->device));
     auto up_out = ttnn::matmul(
-        /*input_tensor_a=*/hidden,
-        /*input_tensor_b=*/realize_ggml_view(ffn_up->src[0]),
+        /*input_tensor_a=*/hidden_tt,
+        /*input_tensor_b=*/realize_ggml_view(up_weight),
         /*transpose_a=*/false,
-        /*transpose_b=*/true,
-        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
+        /*transpose_b=*/!tensor_extra::from(up_weight)->is_pretransposed,
+        /*memory_config=*/ttnn::L1_WIDTH_SHARDED_MEMORY_CONFIG,
         /*dtype=*/ggml2tt_type(ffn_up->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
         /*compute_kernel_config=*/make_compute_kernel_config(ctx->device));
 
-    GGML_ASSERT(ffn_glu->src[0] == ffn_gate && ffn_glu->src[1] == ffn_up);
-    ttnn::multiply_(up_out, gate_out);
+    ttnn::multiply_(up_out, gate_out,
+                    /*post_activations=*/{},
+                    /*lhs_activations=*/{},
+                    /*rhs_activations=*/{ { activation } });
     gate_out.deallocate();
 
     GGML_ASSERT(ffn_down->src[1] == ffn_glu);
     auto down_out = ttnn::matmul(
         /*input_tensor_a=*/up_out,
-        /*input_tensor_b=*/realize_ggml_view(ffn_down->src[0]),
+        /*input_tensor_b=*/realize_ggml_view(down_weight),
         /*transpose_a=*/false,
-        /*transpose_b=*/true,
-        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
+        /*transpose_b=*/!tensor_extra::from(down_weight)->is_pretransposed,
+        /*memory_config=*/ttnn::L1_WIDTH_SHARDED_MEMORY_CONFIG,
         /*dtype=*/ggml2tt_type(ffn_down->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
         /*compute_kernel_config=*/make_compute_kernel_config(ctx->device));
     up_out.deallocate();
 
-    GGML_ASSERT(ffn_add->src[0] == ffn_down);
-    get_tt_tensor(ffn_add) = ttnn::add(down_out, realize_ggml_view(ffn_add->src[1]));
+    tensor_extra::from(ffn_add)->tensor = ttnn::add(down_out, realize_ggml_view(attn_residual),
+                                                    /*output_dtype=*/std::nullopt,
+                                                    /*memory_config=*/ttnn::DRAM_MEMORY_CONFIG);
     down_out.deallocate();
 }
 
@@ -1435,7 +1450,7 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
             const ggml_tensor * ffn_up   = cgraph->nodes[i + 1];
             const ggml_tensor * ffn_glu  = cgraph->nodes[i + 2];
             const ggml_tensor * ffn_down = cgraph->nodes[i + 3];
-            ggml_tensor * ffn_add  = cgraph->nodes[i + 4];
+            ggml_tensor *       ffn_add  = cgraph->nodes[i + 4];
 
             ggml_metalium_fused_ffn(ctx, ffn_gate, ffn_up, ffn_glu, ffn_down, ffn_add);
             i += 4;
