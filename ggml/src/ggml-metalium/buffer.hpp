@@ -2,6 +2,7 @@
 
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
+#include "ttnn/distributed/distributed_tensor.hpp"
 
 #include <memory>
 #include <string>
@@ -17,6 +18,8 @@ struct tensor_extra {
 
     /// Whether this tensor is always used transposed (i.e. for weights).
     bool is_pretransposed;
+    std::optional<size_t> tp_dim;
+    std::optional<ttnn::distributed::TensorToMesh> mesh_mapper;
 
     static tensor_extra * from(const ggml_tensor * tensor) {
         return static_cast<tensor_extra *>(tensor->extra);
@@ -34,6 +37,13 @@ struct ggml_backend_metalium_buffer_context {
 
     // Tracking our own allocations because Metalium limitations and GGML assuming them
     std::vector<std::unique_ptr<tensor_extra>> metadata_to_free;
+
+    ssize_t tp_axis() const { return device->shape().dims() - 1; }
+
+    std::optional<size_t> tp_ne() const {
+        size_t shard_devs = device->shape()[tp_axis()];
+        return (shard_devs > 1) ? std::make_optional(shard_devs) : std::nullopt;
+    }
 
     static ggml_backend_metalium_buffer_context * get(ggml_backend_buffer_t b) {
         return static_cast<ggml_backend_metalium_buffer_context *>(b->context);

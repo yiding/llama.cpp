@@ -1,6 +1,7 @@
 #include "buffer.hpp"
 
 #include "ggml.h"
+#include "ttnn/distributed/distributed_tensor.hpp"
 #include "ttnn/types.hpp"
 #include "utils.hpp"
 
@@ -446,14 +447,20 @@ static void ggml_backend_metalium_buffer_set_tensor(ggml_backend_buffer_t buffer
 
     tt::tt_metal::DataType final_type = ggml2tt_type(ggtype, bufctx->device->arch());
     if (tilize) {
-        t = ttnn::tilize_with_zero_padding(t.to_device(bufctx->device.get()), std::nullopt, final_type);
+        t = ctx->mesh_mapper.has_value() ?
+                ttnn::distributed::distribute_tensor(t, ctx->mesh_mapper.value(), *bufctx->device) :
+                t.to_device(bufctx->device.get());
+        t = ttnn::tilize_with_zero_padding(t, std::nullopt, final_type);
         if (permute.has_value()) {
             t = ttnn::permute(t, *permute);
         }
     } else {
-        t = t.to_device(bufctx->device.get());
         GGML_ASSERT(t.dtype() == final_type && "Tensor dtype mismatch during tensor creation for row major tensors");
         GGML_ASSERT(!permute.has_value() && "Cannot permute tensor without tilizing");
+
+        t = ctx->mesh_mapper.has_value() ?
+                ttnn::distributed::distribute_tensor(t, ctx->mesh_mapper.value(), *bufctx->device) :
+                t.to_device(bufctx->device.get());
     }
 
     if (ctx->is_pretransposed) {
@@ -599,10 +606,25 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
     const auto & shape = tt_shape_of(tensor);
 
     string_view       name{ tensor->name };
-    static const auto PRETRANSPOSE = { "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight" };
-    if (std::any_of(PRETRANSPOSE.begin(), PRETRANSPOSE.end(),
-                    [&](const char * name_suffix) { return name.find(name_suffix) != string_view::npos; })) {
+    if (name.find("ffn_gate.weight") != string_view::npos || name.find("ffn_up.weight") != string_view::npos) {
         meta->is_pretransposed = true;
+        // Sharding happens before possible transposing, so we use dim 2 (i.e.
+        // the contracting dimension)
+        if (bufctx->tp_ne().has_value()) {
+            meta->tp_dim = 2;
+            meta->mesh_mapper =
+                std::move(*ttnn::distributed::shard_tensor_to_mesh_mapper(*bufctx->device, 2, bufctx->tp_axis()));
+        }
+    } else if (name.find("ffn_down.weight") != string_view::npos) {
+        meta->is_pretransposed = true;
+        // Sharding happens before possible transposing, so we use dim 2 (i.e.
+        // the contracting dimension)
+        if (bufctx->tp_ne().has_value()) {
+            meta->tp_dim = 3;
+            meta->mesh_mapper =
+                std::move(*ttnn::distributed::shard_tensor_to_mesh_mapper(*bufctx->device, 3, bufctx->tp_axis()));
+        }
+
     } else {
         meta->is_pretransposed = false;
     }
@@ -621,9 +643,13 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
     needs_init |= (name.find("cache") != std::string::npos && tensor->op == GGML_OP_NONE);
 
     if (needs_init) {
-        auto t       = ttnn::zeros(tt_shape_of(tensor), ggml2tt_type(tensor->type, bufctx->device->arch()),
-                                   tt::tt_metal::Layout::ROW_MAJOR);
-        t            = ttnn::tilize_with_zero_padding(t.to_device(bufctx->device.get()));
+        auto t = ttnn::zeros(tt_shape_of(tensor), ggml2tt_type(tensor->type, bufctx->device->arch()),
+                             tt::tt_metal::Layout::TILE);
+        if (meta->mesh_mapper.has_value()) {
+            t = ttnn::distributed::distribute_tensor(t, meta->mesh_mapper.value(), *bufctx->device);
+        } else {
+            t = t.to_device(bufctx->device.get());
+        }
         meta->tensor = std::move(t);
     }
     return GGML_STATUS_SUCCESS;

@@ -1,13 +1,15 @@
 #include "ggml-metalium.h"
 
 #include "buffer.hpp"
-#include "build_RelWithDebInfo/include/tt_stl/span.hpp"
 #include "fmt/base.h"
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "ggml.h"
 #include "hostdevcommon/common_values.hpp"
+#include "tt-metalium/experimental/fabric/fabric.hpp"
+#include "ttnn/distributed/distributed_tensor.hpp"
+#include "ttnn/operations/ccl/all_reduce/all_reduce.hpp"
 #include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 #include "ttnn/operations/eltwise/binary/binary.hpp"
 #include "ttnn/operations/eltwise/binary/binary_composite.hpp"
@@ -34,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string_view>
 #include <ttnn/core.hpp>
 #include <ttnn/cpp/ttnn/operations/data_movement/gather/tosa/gather_tosa.hpp>
@@ -65,6 +68,8 @@
 // #include "mul_mat.hpp"
 // #include "soft_max.hpp"
 
+using namespace std::literals;
+
 extern void metalium_register_all_kernel();
 
 namespace ggml_backend_metalium {
@@ -72,9 +77,14 @@ namespace ggml_backend_metalium {
 namespace {
 
 struct ggml_backend_metalium_context {
-    ttnn::MeshDevice * device    = nullptr;
-    int                device_id = 0;
-    std::string        name;
+    std::shared_ptr<ttnn::MeshDevice> device;
+    int                               device_id;
+    std::string                       name;
+
+    ggml_backend_metalium_context(std::shared_ptr<ttnn::MeshDevice> device, int device_id, std::string name) :
+        device(device),
+        device_id(device_id),
+        name(std::move(name)) {}
 };
 
 struct ggml_backend_metalium_device_context {
@@ -134,15 +144,15 @@ static void dump_ggml_tensor_meta(const ggml_tensor * ggtensor) {
     }
 }
 
-static ttnn::DeviceComputeKernelConfig make_compute_kernel_config(ttnn::IDevice * device) {
+static ttnn::DeviceComputeKernelConfig make_compute_kernel_config(const ttnn::IDevice & device) {
     ttnn::DeviceComputeKernelConfig cfg;
-    if (device->arch() == tt::ARCH::WORMHOLE_B0 || device->arch() == tt::ARCH::BLACKHOLE) {
+    if (device.arch() == tt::ARCH::WORMHOLE_B0 || device.arch() == tt::ARCH::BLACKHOLE) {
         cfg = ttnn::WormholeComputeKernelConfig{ .math_fidelity    = MathFidelity::HiFi4,
                                                  .math_approx_mode = false,
                                                  .fp32_dest_acc_en = false,
                                                  .packer_l1_acc    = false };
     } else {
-        fmt::println(stderr, "Unsupported device arch {} in make_compute_kernel_config", device->arch());
+        fmt::println(stderr, "Unsupported device arch {} in make_compute_kernel_config", device.arch());
         abort();
     }
     return cfg;
@@ -271,7 +281,11 @@ static void ggml_backend_metalium_mul_mat(ggml_backend_metalium_context * ctx, s
         /*dtype=*/std::nullopt,
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
-        /*compute_kernel_config=*/make_compute_kernel_config(a.device()));
+        /*compute_kernel_config=*/make_compute_kernel_config(*a.device()));
+    if (tensor_extra::from(src1)->mesh_mapper.has_value()) {
+        // the tensor is distributed, so we need a collective here.
+        dst_tt = ttnn::all_reduce(dst_tt, ggml_backend_metalium_buffer_context::get(src1->buffer)->tp_axis());
+    }
     GGML_ASSERT(dst_tt.storage_type() == tt::tt_metal::StorageType::DEVICE);
 }
 
@@ -1255,7 +1269,9 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
     ggml_tensor * down_weight   = ffn_down->src[0];
     ggml_tensor * attn_residual = ffn_add->src[1];
 
-    if (ggml_nelements(ffn_add) == 0) {  // Handle empty batches.
+    // Empty batches happens during warmup. We can early return at this point
+    // after all the setup is done.
+    if (ggml_nelements(ffn_add) == 0) {
         tensor_extra::from(ffn_add)->tensor =
             ttnn::zeros(tt_shape_of(ffn_add), ggml2tt_type(ffn_add->type, ctx->device->arch()),
                         tt::tt_metal::Layout::TILE, *ctx->device);
@@ -1288,7 +1304,7 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*dtype=*/ggml2tt_type(ffn_gate->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
-        /*compute_kernel_config=*/make_compute_kernel_config(ctx->device));
+        /*compute_kernel_config=*/make_compute_kernel_config(*ctx->device));
     auto up_out = ttnn::matmul(
         /*input_tensor_a=*/hidden_tt,
         /*input_tensor_b=*/realize_ggml_view(up_weight),
@@ -1298,7 +1314,7 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*dtype=*/ggml2tt_type(ffn_up->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
-        /*compute_kernel_config=*/make_compute_kernel_config(ctx->device));
+        /*compute_kernel_config=*/make_compute_kernel_config(*ctx->device));
 
     ttnn::multiply_(up_out, gate_out,
                     /*post_activations=*/{},
@@ -1316,8 +1332,14 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*dtype=*/ggml2tt_type(ffn_down->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
-        /*compute_kernel_config=*/make_compute_kernel_config(ctx->device));
+        /*compute_kernel_config=*/make_compute_kernel_config(*ctx->device));
     up_out.deallocate();
+
+    // If tensor parallelism is enabled, all-reduce the down output across devices.
+    auto * bufctx = ggml_backend_metalium_buffer_context::get(ffn_add->buffer);
+    if (bufctx->tp_ne().has_value()) {
+        down_out = ttnn::all_reduce(down_out, bufctx->tp_axis());
+    }
 
     tensor_extra::from(ffn_add)->tensor = ttnn::add(down_out, realize_ggml_view(attn_residual),
                                                     /*output_dtype=*/std::nullopt,
@@ -1828,8 +1850,8 @@ static ggml_guid_t ggml_backend_metalium_guid(void) {
 }
 
 static ggml_backend_t ggml_backend_metalium_init(ggml_backend_metalium_device_context * dev_ctx) {
-    int                device_id = dev_ctx->device_id;
-    ttnn::MeshDevice * device    = dev_ctx->device.get();
+    int                               device_id = dev_ctx->device_id;
+    std::shared_ptr<ttnn::MeshDevice> device    = dev_ctx->device;
     GGML_ASSERT(device_id >= 0 && (size_t) device_id < tt::tt_metal::GetNumAvailableDevices());
     GGML_ASSERT(device != nullptr);
 
@@ -1982,9 +2004,9 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg() {
         int          device_id   = 0;
 
         const char * device_id_env =
-            getenv("GGML_METALIUM_DEVICE_ID");   // example GGML_METALIUM_DEVICE_ID=0 - use device 0
-        const char * mesh_env =
-            getenv("GGML_METALIUM_MESH_SHAPE");  // example GGML_METALIUM_MESH_SHAPE=2,4 use mesh of shape 2,4
+            getenv("GGML_METALIUM_DEVICE_ID");  // example GGML_METALIUM_DEVICE_ID=0 - use device 0
+        // Mesh shape can be one or two dimensional, delimited by 'x', e.g. "2x4" or "4"
+        const char *    mesh_env = getenv("GGML_METALIUM_MESH_SHAPE");
         ttnn::MeshShape mesh_shape;
         if (device_id_env != NULL && mesh_env != NULL) {
             GGML_ABORT(
@@ -1999,22 +2021,48 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg() {
             }
         }
         if (mesh_env != NULL) {
-            std::string_view mesh_view(mesh_env);
-            size_t           n = mesh_view.find('x');
-            if (n == std::string_view::npos) {
-                GGML_ABORT("Invalid mesh shape in GGML_METALIUM_MESH_SHAPE. Expected format WxH. ex: 2x4");
-            }
-            int y = 0;
-            int x = 0;
-            try {
-                y = std::stoi(std::string(mesh_view.substr(0, n)));
-                x = std::stoi(std::string(mesh_view.substr(n + 1)));
-            } catch (const std::invalid_argument & e) {
-                GGML_ABORT("Invalid mesh shape in GGML_METALIUM_MESH_SHAPE");
-            }
+            std::string mesh_env_str(mesh_env);
+            std::regex  pattern(R"(^(\d+)(x(\d+))?$)");
+            std::smatch matches;
 
-            GGML_ASSERT(x > 0 && y > 0 && "Invalid mesh shape in GGML_METALIUM_MESH_SHAPE");
-            mesh_shape = ttnn::MeshShape(x, y);
+            if (std::regex_match(mesh_env_str, matches, pattern)) {
+                int x = std::stoi(matches[1].str());
+                GGML_ASSERT(x > 0 && "Mesh shape dimension x must be positive");
+                if (matches[3].length() > 0) {
+                    int y = std::stoi(matches[3].str());
+                    GGML_ASSERT(y > 0 && "Mesh shape dimension y must be positive, or omitted");
+                    mesh_shape = ttnn::MeshShape(x, y);
+                } else {
+                    mesh_shape = ttnn::MeshShape(x);
+                }
+            } else {
+                GGML_ABORT("Invalid mesh shape in GGML_METALIUM_MESH_SHAPE. Expected format H or WxH. ex: 4, 2x4");
+            }
+        }
+
+        // Fabric config needs to be set before creating devices.
+        const char * fabric_config = getenv("GGML_METALIUM_FABRIC_CONFIG");
+        if (fabric_config != NULL) {
+            std::string_view            fabric_config_view(fabric_config);
+            tt::tt_fabric::FabricConfig config;
+            if (fabric_config_view == "FABRIC_1D_NEIGHBOR_EXCHANGE"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_1D_NEIGHBOR_EXCHANGE;
+            } else if (fabric_config_view == "FABRIC_1D"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_1D;
+            } else if (fabric_config_view == "FABRIC_1D_RING"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_1D_RING;
+            } else if (fabric_config_view == "FABRIC_2D"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_2D;
+            } else if (fabric_config_view == "FABRIC_2D_TORUS_X"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_2D_TORUS_X;
+            } else if (fabric_config_view == "FABRIC_2D_TORUS_Y"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_2D_TORUS_Y;
+            } else if (fabric_config_view == "FABRIC_2D_TORUS_XY"sv) {
+                config = tt::tt_fabric::FabricConfig::FABRIC_2D_TORUS_XY;
+            } else {
+                GGML_ABORT("Invalid fabric config in GGML_METALIUM_FABRIC_CONFIG.");
+            }
+            tt::tt_fabric::SetFabricConfig(config);
         }
 
         ctx->devices.reserve(num_devices);
@@ -2024,7 +2072,7 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg() {
             device = ttnn::open_mesh_device(device_id);
         } else {
             device = ttnn::distributed::open_mesh_device(mesh_shape, DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE,
-                                                         2, tt::tt_metal::DispatchCoreType::ETH);
+                                                         1, tt::tt_metal::DispatchCoreConfig{});
         }
         if (!g_debug_flags.disable_program_cache) {
             ttnn::enable_program_cache(*device);

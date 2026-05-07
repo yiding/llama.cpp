@@ -130,12 +130,17 @@ std::string to_string_precise(float value) {
 
 bool ggml_tt_tensors_shape_equal(const ggml_tensor * ggtensor, const tt::tt_metal::Tensor & ttensor) {
     tensor_extra * meta = tensor_extra::from(ggtensor);
+    ggml_backend_metalium_buffer_context * bufctx = ggml_backend_metalium_buffer_context::get(ggtensor->buffer);
     ttnn::Shape shape = ttensor.logical_shape();
     if (meta->is_pretransposed) {
         size_t h = shape[-1];
         size_t w = shape[-2];
         shape[-1] = w;
         shape[-2] = h;
+    }
+    if (meta->tp_dim.has_value() && bufctx->tp_ne().has_value()) {
+        // TODO this is hard-coded, perhaps it shouldn't be.
+        shape[meta->tp_dim.value()] *= bufctx->tp_ne().value();
     }
     for (size_t i = 0; i < std::min<size_t>(GGML_MAX_DIMS, shape.size()); i++) {
         if (ggtensor->ne[GGML_MAX_DIMS - i - 1] != shape[i]) {
