@@ -2070,7 +2070,7 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg() {
             getenv("GGML_METALIUM_DEVICE_ID");  // example GGML_METALIUM_DEVICE_ID=0 - use device 0
         // Mesh shape can be one or two dimensional, delimited by 'x', e.g. "2x4" or "4"
         const char *    mesh_env = getenv("GGML_METALIUM_MESH_SHAPE");
-        ttnn::MeshShape mesh_shape;
+        ttnn::MeshShape mesh_shape(1, 1);
         if (device_id_env != NULL && mesh_env != NULL) {
             GGML_ABORT(
                 "Both GGML_METALIUM_DEVICE_ID and GGML_METALIUM_MESH_SHAPE are set. Only one can be used at the same "
@@ -2085,27 +2085,23 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_metalium_reg() {
         }
         if (mesh_env != NULL) {
             std::string mesh_env_str(mesh_env);
-            std::regex  pattern(R"(^(\d+)(x(\d+))?$)");
+            std::regex  pattern(R"(^(\d+)x(\d+)$)");
             std::smatch matches;
 
             if (std::regex_match(mesh_env_str, matches, pattern)) {
                 int x = std::stoi(matches[1].str());
                 GGML_ASSERT(x > 0 && "Mesh shape dimension x must be positive");
-                if (matches[3].length() > 0) {
-                    int y = std::stoi(matches[3].str());
-                    GGML_ASSERT(y > 0 && "Mesh shape dimension y must be positive, or omitted");
-                    mesh_shape = ttnn::MeshShape(x, y);
-                } else {
-                    mesh_shape = ttnn::MeshShape(x);
-                }
+                int y = std::stoi(matches[2].str());
+                GGML_ASSERT(y > 0 && "Mesh shape dimension y must be positive");
+                mesh_shape = ttnn::MeshShape(x, y);
             } else {
-                GGML_ABORT("Invalid mesh shape in GGML_METALIUM_MESH_SHAPE. Expected format H or WxH. ex: 4, 2x4");
+                GGML_ABORT("Invalid mesh shape in GGML_METALIUM_MESH_SHAPE. Expected format WxH. ex: 1x4");
             }
         }
 
         // Fabric config needs to be set before creating devices.
         const char * fabric_config = getenv("GGML_METALIUM_FABRIC_CONFIG");
-        if (fabric_config != NULL) {
+        if (fabric_config != NULL && mesh_shape.mesh_size() > 1) {
             std::string_view            fabric_config_view(fabric_config);
             tt::tt_fabric::FabricConfig config;
             if (fabric_config_view == "FABRIC_1D_NEIGHBOR_EXCHANGE"sv) {
