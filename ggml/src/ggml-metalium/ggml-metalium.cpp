@@ -1249,6 +1249,59 @@ static void ggml_backend_metalium_flash_attn(ggml_backend_metalium_context * ctx
     get_tt_tensor(dst) = res;
 }
 
+/// TTNN's implementation can handle weight and bias in one operation.
+static void ggml_metalium_fused_norm(ggml_backend_metalium_context * ctx,
+                                     ggml_tensor *                   norm,
+                                     ggml_tensor *                   scale,
+                                     ggml_tensor *                   bias) {
+    GGML_UNUSED(ctx);
+
+    const ttnn::Tensor &              input = realize_ggml_view(norm->src[0]);
+    std::optional<const ttnn::Tensor> scale_tt;
+    std::optional<const ttnn::Tensor> bias_tt;
+    ttnn::Tensor *                    last = &get_tt_tensor(norm);
+
+    if (scale != nullptr) {
+        GGML_ASSERT(scale->src[0] == norm);
+        scale_tt.emplace(realize_ggml_view(scale->src[1]));
+        last = &get_tt_tensor(scale);
+    }
+    if (bias != nullptr) {
+        GGML_ASSERT(bias->src[0] == (scale != nullptr ? scale : norm));
+        bias_tt.emplace(realize_ggml_view(bias->src[1]));
+        last = &get_tt_tensor(bias);
+    }
+
+    float esp = 0;
+    memcpy(&esp, norm->op_params, sizeof(esp));
+
+    // Same rationale as the single-element case in the standalone norm op, but
+    // here we have to apply the scale and bias if needed.
+    if (input.logical_shape()[-1] == 1) {
+        *last = ttnn::typecast(ttnn::sign(input), input.dtype());
+        if (scale_tt) {
+            *last = ttnn::multiply_(*last, scale_tt.value());
+        }
+        if (bias_tt) {
+            *last = ttnn::add_(*last, bias_tt.value());
+        }
+        return;
+    }
+
+    tt::tt_metal::Tensor res;
+
+    switch (norm->op) {
+        case GGML_OP_RMS_NORM:
+            *last = ttnn::rms_norm(input, esp, scale_tt, bias_tt);
+            break;
+        case GGML_OP_NORM:
+            *last = ttnn::layer_norm(input, esp, scale_tt, bias_tt);
+            break;
+        default:
+            GGML_ABORT("unexpected op type for norm node %s: %d", norm->name, norm->type);
+    }
+}
+
 static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
                                     const ggml_tensor *             ffn_gate,
                                     const ggml_tensor *             ffn_up,
@@ -1475,7 +1528,17 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
             ggml_tensor *       ffn_add  = cgraph->nodes[i + 4];
 
             ggml_metalium_fused_ffn(ctx, ffn_gate, ffn_up, ffn_glu, ffn_down, ffn_add);
-            i += 4;
+            i += mul_mat_glu.size() - 1;
+            continue;
+        }
+
+        // Add the other cases for norm as needed.
+        auto norm_scale = {GGML_OP_RMS_NORM, GGML_OP_MUL};
+        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, {i + 1})) {
+            ggml_tensor * norm = cgraph->nodes[i];
+            ggml_tensor * scale = cgraph->nodes[i + 1];
+            ggml_metalium_fused_norm(ctx, norm, scale, nullptr);
+            i += norm_scale.size() - 1;
             continue;
         }
 
