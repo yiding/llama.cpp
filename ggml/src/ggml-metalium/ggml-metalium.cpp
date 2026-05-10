@@ -1348,12 +1348,15 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
 
     auto hidden_tt = realize_ggml_view(hidden_input);
 
+    auto batch_size                 = hidden_input->ne[3] * hidden_input->ne[2] * hidden_input->ne[1];
+    auto intermediate_memory_config = batch_size > 512 ? ttnn::DRAM_MEMORY_CONFIG : ttnn::L1_MEMORY_CONFIG;
+
     auto gate_out = ttnn::matmul(
         /*input_tensor_a=*/hidden_tt,
         /*input_tensor_b=*/realize_ggml_view(gate_weight),
         /*transpose_a=*/false,
         /*transpose_b=*/!tensor_extra::from(gate_weight)->is_pretransposed,
-        /*memory_config=*/std::nullopt,
+        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
         /*dtype=*/ggml2tt_type(ffn_gate->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
@@ -1363,7 +1366,7 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*input_tensor_b=*/realize_ggml_view(up_weight),
         /*transpose_a=*/false,
         /*transpose_b=*/!tensor_extra::from(up_weight)->is_pretransposed,
-        /*memory_config=*/std::nullopt,
+        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
         /*dtype=*/ggml2tt_type(ffn_up->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
@@ -1381,7 +1384,7 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*input_tensor_b=*/realize_ggml_view(down_weight),
         /*transpose_a=*/false,
         /*transpose_b=*/!tensor_extra::from(down_weight)->is_pretransposed,
-        /*memory_config=*/std::nullopt,
+        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
         /*dtype=*/ggml2tt_type(ffn_down->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
@@ -1533,9 +1536,9 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
         }
 
         // Add the other cases for norm as needed.
-        auto norm_scale = {GGML_OP_RMS_NORM, GGML_OP_MUL};
-        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, {i + 1})) {
-            ggml_tensor * norm = cgraph->nodes[i];
+        auto norm_scale = { GGML_OP_RMS_NORM, GGML_OP_MUL };
+        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, { i + 1 })) {
+            ggml_tensor * norm  = cgraph->nodes[i];
             ggml_tensor * scale = cgraph->nodes[i + 1];
             ggml_metalium_fused_norm(ctx, norm, scale, nullptr);
             i += norm_scale.size() - 1;
