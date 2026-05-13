@@ -1252,8 +1252,8 @@ static void ggml_backend_metalium_flash_attn(ggml_backend_metalium_context * ctx
 /// TTNN's implementation can handle weight and bias in one operation.
 static void ggml_metalium_fused_norm(ggml_backend_metalium_context * ctx,
                                      ggml_tensor *                   norm,
-                                     ggml_tensor *                   scale,
-                                     ggml_tensor *                   bias) {
+                                     std::optional<ggml_tensor *>    scale,
+                                     std::optional<ggml_tensor *>    bias) {
     GGML_UNUSED(ctx);
 
     const ttnn::Tensor &              input = realize_ggml_view(norm->src[0]);
@@ -1261,15 +1261,15 @@ static void ggml_metalium_fused_norm(ggml_backend_metalium_context * ctx,
     std::optional<const ttnn::Tensor> bias_tt;
     ttnn::Tensor *                    last = &get_tt_tensor(norm);
 
-    if (scale != nullptr) {
-        GGML_ASSERT(scale->src[0] == norm);
-        scale_tt.emplace(realize_ggml_view(scale->src[1]));
-        last = &get_tt_tensor(scale);
+    if (scale.has_value()) {
+        GGML_ASSERT(scale.value()->src[0] == norm);
+        scale_tt.emplace(realize_ggml_view(scale.value()->src[1]));
+        last = &get_tt_tensor(scale.value());
     }
-    if (bias != nullptr) {
-        GGML_ASSERT(bias->src[0] == (scale != nullptr ? scale : norm));
-        bias_tt.emplace(realize_ggml_view(bias->src[1]));
-        last = &get_tt_tensor(bias);
+    if (bias.has_value()) {
+        GGML_ASSERT(bias.value()->src[0] == (scale != nullptr ? scale : norm));
+        bias_tt.emplace(realize_ggml_view(bias.value()->src[1]));
+        last = &get_tt_tensor(bias.value());
     }
 
     float esp = 0;
@@ -1302,31 +1302,40 @@ static void ggml_metalium_fused_norm(ggml_backend_metalium_context * ctx,
     }
 }
 
-static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
-                                    const ggml_tensor *             ffn_gate,
-                                    const ggml_tensor *             ffn_up,
-                                    const ggml_tensor *             ffn_glu,
-                                    const ggml_tensor *             ffn_down,
-                                    const ggml_tensor *             ffn_add) {
+static void ggml_metalium_fused_ffn(ggml_backend_metalium_context *    ctx,
+                                    const ggml_tensor *                ffn_gate,
+                                    const ggml_tensor *                ffn_up,
+                                    const ggml_tensor *                ffn_glu,
+                                    const ggml_tensor *                ffn_down,
+                                    std::optional<const ggml_tensor *> ffn_add) {
     // Check this subgraph is actually what we expect
     GGML_ASSERT(ffn_gate->src[1] == ffn_up->src[1]);
     GGML_ASSERT(ffn_glu->src[0] == ffn_gate);
     GGML_ASSERT(ffn_glu->src[1] == ffn_up);
     GGML_ASSERT(ffn_down->src[1] == ffn_glu);
-    GGML_ASSERT(ffn_add->src[0] == ffn_down);
+
+    if (ffn_add.has_value()) {
+        GGML_ASSERT(ffn_add.value()->src[0] == ffn_down);
+    }
 
     // More useful names.
-    ggml_tensor * hidden_input  = ffn_gate->src[1];
-    ggml_tensor * gate_weight   = ffn_gate->src[0];
-    ggml_tensor * up_weight     = ffn_up->src[0];
-    ggml_tensor * down_weight   = ffn_down->src[0];
-    ggml_tensor * attn_residual = ffn_add->src[1];
+    ggml_tensor * hidden_input = ffn_gate->src[1];
+    ggml_tensor * gate_weight  = ffn_gate->src[0];
+    ggml_tensor * up_weight    = ffn_up->src[0];
+    ggml_tensor * down_weight  = ffn_down->src[0];
+
+    std::optional<ggml_tensor *> attn_residual = nullptr;
+    if (ffn_add.has_value()) {
+        attn_residual = ffn_add.value()->src[1];
+    }
+
+    const ggml_tensor * result = ffn_add.has_value() ? ffn_add.value() : ffn_down;
 
     // Empty batches happens during warmup. We can early return at this point
     // after all the setup is done.
-    if (ggml_nelements(ffn_add) == 0) {
-        tensor_extra::from(ffn_add)->tensor =
-            ttnn::zeros(tt_shape_of(ffn_add), ggml2tt_type(ffn_add->type, ctx->device->arch()),
+    if (ggml_nelements(result) == 0) {
+        tensor_extra::from(result)->tensor =
+            ttnn::zeros(tt_shape_of(result), ggml2tt_type(result->type, ctx->device->arch()),
                         tt::tt_metal::Layout::TILE, *ctx->device);
         return;
     }
@@ -1349,14 +1358,15 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
     auto hidden_tt = realize_ggml_view(hidden_input);
 
     auto batch_size                 = hidden_input->ne[3] * hidden_input->ne[2] * hidden_input->ne[1];
-    auto intermediate_memory_config = batch_size > 512 ? ttnn::DRAM_MEMORY_CONFIG : ttnn::L1_MEMORY_CONFIG;
+    // TODO: replace magic threshold with configuration.
+    auto intermediate_memory_config = batch_size > 256 ? ttnn::DRAM_MEMORY_CONFIG : ttnn::L1_MEMORY_CONFIG;
 
     auto gate_out = ttnn::matmul(
         /*input_tensor_a=*/hidden_tt,
         /*input_tensor_b=*/realize_ggml_view(gate_weight),
         /*transpose_a=*/false,
         /*transpose_b=*/!tensor_extra::from(gate_weight)->is_pretransposed,
-        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
+        /*memory_config=*/intermediate_memory_config,
         /*dtype=*/ggml2tt_type(ffn_gate->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
@@ -1366,7 +1376,7 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*input_tensor_b=*/realize_ggml_view(up_weight),
         /*transpose_a=*/false,
         /*transpose_b=*/!tensor_extra::from(up_weight)->is_pretransposed,
-        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
+        /*memory_config=*/intermediate_memory_config,
         /*dtype=*/ggml2tt_type(ffn_up->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
@@ -1384,7 +1394,7 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
         /*input_tensor_b=*/realize_ggml_view(down_weight),
         /*transpose_a=*/false,
         /*transpose_b=*/!tensor_extra::from(down_weight)->is_pretransposed,
-        /*memory_config=*/ttnn::L1_MEMORY_CONFIG,
+        /*memory_config=*/intermediate_memory_config,
         /*dtype=*/ggml2tt_type(ffn_down->type, ctx->device->arch()),
         /*program_config=*/std::nullopt,
         /*activation=*/std::nullopt,
@@ -1392,14 +1402,19 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context * ctx,
     up_out.deallocate();
 
     // If tensor parallelism is enabled, all-reduce the down output across devices.
-    auto * bufctx = ggml_backend_metalium_buffer_context::get(ffn_add->buffer);
+    auto * bufctx = ggml_backend_metalium_buffer_context::get(result->buffer);
     if (bufctx->tp_ne().has_value()) {
         down_out = ttnn::all_reduce(down_out, bufctx->tp_axis());
     }
 
-    tensor_extra::from(ffn_add)->tensor = ttnn::add(down_out, realize_ggml_view(attn_residual),
-                                                    /*output_dtype=*/std::nullopt,
-                                                    /*memory_config=*/ttnn::DRAM_MEMORY_CONFIG);
+    if (ffn_add.has_value()) {
+        tensor_extra::from(ffn_add.value())->tensor = ttnn::add(down_out, realize_ggml_view(attn_residual.value()),
+                                                                /*output_dtype=*/std::nullopt,
+                                                                /*memory_config=*/ttnn::DRAM_MEMORY_CONFIG);
+    } else {
+        tensor_extra::from(ffn_down)->tensor = down_out;
+    }
+
     down_out.deallocate();
 }
 
@@ -1521,9 +1536,10 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
             continue;
         }
 
-        // Check for fused ops
-        auto mul_mat_glu = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU, GGML_OP_MUL_MAT, GGML_OP_ADD };
-        if (ggml_can_fuse_subgraph(cgraph, i, mul_mat_glu, { i + 4 })) {
+        // Check for ffn patterns. Longest should go first.
+        auto ffn_add_ops = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU, GGML_OP_MUL_MAT, GGML_OP_ADD };
+        auto ffn_ops = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU, GGML_OP_MUL_MAT };
+        if (ggml_can_fuse_subgraph(cgraph, i, ffn_add_ops, { i + (int)ffn_add_ops.size() - 1 })) {
             const ggml_tensor * ffn_gate = cgraph->nodes[i];
             const ggml_tensor * ffn_up   = cgraph->nodes[i + 1];
             const ggml_tensor * ffn_glu  = cgraph->nodes[i + 2];
@@ -1531,13 +1547,32 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
             ggml_tensor *       ffn_add  = cgraph->nodes[i + 4];
 
             ggml_metalium_fused_ffn(ctx, ffn_gate, ffn_up, ffn_glu, ffn_down, ffn_add);
-            i += mul_mat_glu.size() - 1;
+            i += ffn_add_ops.size() - 1;
+            continue;
+        }
+        if (ggml_can_fuse_subgraph(cgraph, i, ffn_ops, { i + (int)ffn_ops.size() - 1 })) {
+            const ggml_tensor * ffn_gate = cgraph->nodes[i];
+            const ggml_tensor * ffn_up   = cgraph->nodes[i + 1];
+            const ggml_tensor * ffn_glu  = cgraph->nodes[i + 2];
+            const ggml_tensor * ffn_down = cgraph->nodes[i + 3];
+
+            ggml_metalium_fused_ffn(ctx, ffn_gate, ffn_up, ffn_glu, ffn_down, std::nullopt);
+            i += ffn_ops.size() - 1;
             continue;
         }
 
         // Add the other cases for norm as needed.
+        auto norm_scale_add = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD };
         auto norm_scale = { GGML_OP_RMS_NORM, GGML_OP_MUL };
-        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, { i + 1 })) {
+        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale_add, { i + (int)norm_scale_add.size() - 1 })) {
+            ggml_tensor * norm  = cgraph->nodes[i];
+            ggml_tensor * scale = cgraph->nodes[i + 1];
+            ggml_tensor * add = cgraph->nodes[i + 2];
+            ggml_metalium_fused_norm(ctx, norm, scale, add);
+            i += norm_scale_add.size() - 1;
+            continue;
+        }
+        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, { i + (int)norm_scale.size() - 1 })) {
             ggml_tensor * norm  = cgraph->nodes[i];
             ggml_tensor * scale = cgraph->nodes[i + 1];
             ggml_metalium_fused_norm(ctx, norm, scale, nullptr);
