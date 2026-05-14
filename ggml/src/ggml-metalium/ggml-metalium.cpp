@@ -623,9 +623,9 @@ static void ggml_backend_metalium_set_rows(ggml_backend_metalium_context * ctx, 
 static bool ggml_backend_metalium_can_norm(const struct ggml_tensor * dst, bool rms) {
     GGML_UNUSED(rms);
     // no hard checks but this seems to work well enough, else we run out of SRAM
-    if (dst->ne[0] > 4096) {
-        return false;
-    }
+    // if (dst->ne[0] > 4096) {
+    //     return false;
+    // }
     return true;
 }
 
@@ -1575,7 +1575,7 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
         if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, { i + (int)norm_scale.size() - 1 })) {
             ggml_tensor * norm  = cgraph->nodes[i];
             ggml_tensor * scale = cgraph->nodes[i + 1];
-            ggml_metalium_fused_norm(ctx, norm, scale, nullptr);
+            ggml_metalium_fused_norm(ctx, norm, scale, std::nullopt);
             i += norm_scale.size() - 1;
             continue;
         }

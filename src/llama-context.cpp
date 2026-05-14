@@ -1,5 +1,6 @@
 #include "llama-context.h"
 
+#include "ggml-backend.h"
 #include "ggml.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
@@ -2342,17 +2343,19 @@ llm_graph_cb llama_context::graph_get_cb() const {
                     }
                 }
             }
-            // Another hack: if norm has weight to multiply, assign the norm
-            // node to the same backend as the weights instead of the layer's
-            // main device.
-            if (il != -1 && cur->op == GGML_OP_MUL && strncmp(cur->src[0]->name, "norm-", 5) == 0) {
-                const auto & dev_weight =
-                    ggml_backend_buft_get_device(ggml_backend_buffer_get_type(cur->src[1]->buffer));
-                for (const auto & backend : backends) {
-                    if (ggml_backend_get_device(backend.get()) == dev_weight) {
-                        if (ggml_backend_supports_op(backend.get(), cur->src[0])) {
-                            ggml_backend_sched_set_tensor_backend(sched.get(), cur->src[0], backend.get());
-                        }
+        }
+
+        // Another hack: if norm has weight to multiply, assign the norm
+        // node to the same backend as the weights instead of the layer's
+        // main device. This *should* supercede the previous hack..
+        if (cur->op == GGML_OP_MUL &&
+            (strncmp(cur->src[0]->name, "norm-", 5) == 0 || cur->src[0]->op == GGML_OP_RMS_NORM)) {
+            const auto & dev_weight =
+                ggml_backend_buft_get_device(ggml_backend_buffer_get_type(cur->src[1]->buffer));
+            for (const auto & backend : backends) {
+                if (ggml_backend_get_device(backend.get()) == dev_weight) {
+                    if (ggml_backend_supports_op(backend.get(), cur->src[0])) {
+                        ggml_backend_sched_set_tensor_backend(sched.get(), cur->src[0], backend.get());
                     }
                 }
             }
