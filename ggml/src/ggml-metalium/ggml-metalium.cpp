@@ -552,17 +552,26 @@ static void ggml_backend_metalium_get_rows(ggml_backend_metalium_context * ctx, 
 
     const auto &        t    = realize_ggml_view(dst->src[0]);
     const ggml_tensor * idxs = dst->src[1];
+
+    if (idxs->ne[0] == 0) {  // if gathering nothing return nothing.
+        get_tt_tensor(dst) = ttnn::zeros(tt_shape_of(dst), ggml2tt_type(dst->type, ctx->device->arch()),
+                                         tt::tt_metal::Layout::TILE, *ctx->device);
+        return;
+    }
+
     if (idxs->ne[0] == 1 && idxs->ne[1] == 1 && idxs->ne[2] == 1 && idxs->ne[3] == 1 && ggml_n_dims(dst->src[0]) == 1) {
         get_tt_tensor(dst) = t;
-    } else {
-        const auto & idxs_tt  = get_tt_tensor(idxs);
-        // The operation wants 3D tensor but we have 4D, op also wants index be 2d
-        const auto & src3d    = t.reshape(t.logical_shape().to_rank(3));
-        const auto & idx2d    = idxs_tt.reshape(idxs_tt.logical_shape().to_rank(2));
-        auto         gathered = ttnn::tosa::gather(src3d, ttnn::tilize_with_zero_padding(idx2d), std::nullopt);
-        gathered              = gathered.reshape(gathered.logical_shape().to_rank(4));
-        get_tt_tensor(dst)    = std::move(gathered);
+        return;
     }
+
+    uint32_t     batch    = idxs->ne[1] * idxs->ne[2];
+    const auto & idxs_tt  = get_tt_tensor(idxs);
+    // The operation wants 3D tensor but we have 4D, op also wants index be 2d
+    const auto & src3d    = t.reshape(t.logical_shape().to_rank(3));
+    const auto & idx2d    = idxs_tt.reshape(idxs_tt.logical_shape().to_rank(2));
+    auto         gathered = ttnn::tosa::gather(src3d, ttnn::tilize_with_zero_padding(idx2d), std::nullopt);
+    gathered              = gathered.reshape(gathered.logical_shape().to_rank(4));
+    get_tt_tensor(dst)    = std::move(gathered);
 }
 
 static bool ggml_backend_metalium_can_set_rows(const struct ggml_tensor * dst) {
@@ -851,9 +860,9 @@ static void ggml_backend_metalium_group_norm(ggml_backend_metalium_context * ctx
 
     // XXX: Moreh's operators needs some cleanup
     const auto & tensor = realize_ggml_view(dst->src[0]);
-    auto res = ttnn::moreh_group_norm(tensor, n_groups, eps, std::nullopt, std::nullopt,
-                                      std::vector<bool>{ true, false, false }, std::nullopt, std::nullopt, std::nullopt,
-                                      std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+    auto         res    = ttnn::moreh_group_norm(tensor, n_groups, eps, std::nullopt, std::nullopt,
+                                                 std::vector<bool>{ true, false, false }, std::nullopt, std::nullopt, std::nullopt,
+                                                 std::nullopt, std::nullopt, std::nullopt, std::nullopt);
     GGML_ASSERT(res[0].has_value());
     get_tt_tensor(dst) = res[0].value();
 }
@@ -1538,8 +1547,8 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
 
         // Check for ffn patterns. Longest should go first.
         auto ffn_add_ops = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU, GGML_OP_MUL_MAT, GGML_OP_ADD };
-        auto ffn_ops = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU, GGML_OP_MUL_MAT };
-        if (ggml_can_fuse_subgraph(cgraph, i, ffn_add_ops, { i + (int)ffn_add_ops.size() - 1 })) {
+        auto ffn_ops     = { GGML_OP_MUL_MAT, GGML_OP_MUL_MAT, GGML_OP_GLU, GGML_OP_MUL_MAT };
+        if (ggml_can_fuse_subgraph(cgraph, i, ffn_add_ops, { i + (int) ffn_add_ops.size() - 1 })) {
             const ggml_tensor * ffn_gate = cgraph->nodes[i];
             const ggml_tensor * ffn_up   = cgraph->nodes[i + 1];
             const ggml_tensor * ffn_glu  = cgraph->nodes[i + 2];
@@ -1550,7 +1559,7 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
             i += ffn_add_ops.size() - 1;
             continue;
         }
-        if (ggml_can_fuse_subgraph(cgraph, i, ffn_ops, { i + (int)ffn_ops.size() - 1 })) {
+        if (ggml_can_fuse_subgraph(cgraph, i, ffn_ops, { i + (int) ffn_ops.size() - 1 })) {
             const ggml_tensor * ffn_gate = cgraph->nodes[i];
             const ggml_tensor * ffn_up   = cgraph->nodes[i + 1];
             const ggml_tensor * ffn_glu  = cgraph->nodes[i + 2];
@@ -1563,16 +1572,16 @@ static enum ggml_status ggml_backend_metalium_graph_compute(ggml_backend_t backe
 
         // Add the other cases for norm as needed.
         auto norm_scale_add = { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD };
-        auto norm_scale = { GGML_OP_RMS_NORM, GGML_OP_MUL };
-        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale_add, { i + (int)norm_scale_add.size() - 1 })) {
+        auto norm_scale     = { GGML_OP_RMS_NORM, GGML_OP_MUL };
+        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale_add, { i + (int) norm_scale_add.size() - 1 })) {
             ggml_tensor * norm  = cgraph->nodes[i];
             ggml_tensor * scale = cgraph->nodes[i + 1];
-            ggml_tensor * add = cgraph->nodes[i + 2];
+            ggml_tensor * add   = cgraph->nodes[i + 2];
             ggml_metalium_fused_norm(ctx, norm, scale, add);
             i += norm_scale_add.size() - 1;
             continue;
         }
-        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, { i + (int)norm_scale.size() - 1 })) {
+        if (ggml_can_fuse_subgraph(cgraph, i, norm_scale, { i + (int) norm_scale.size() - 1 })) {
             ggml_tensor * norm  = cgraph->nodes[i];
             ggml_tensor * scale = cgraph->nodes[i + 1];
             ggml_metalium_fused_norm(ctx, norm, scale, std::nullopt);
@@ -1928,20 +1937,20 @@ static void ggml_backend_metalium_synchronize(ggml_backend_t backend) {
 }
 
 static struct ggml_backend_i metalium_backend_i = {
-    .get_name                = ggml_backend_metalium_name,
-    .free                    = ggml_backend_metalium_free,
-    .set_tensor_async        = NULL,
-    .get_tensor_async        = NULL,
-    .cpy_tensor_async        = NULL,
-    .synchronize             = ggml_backend_metalium_synchronize,
-    .graph_plan_create       = NULL,
-    .graph_plan_free         = NULL,
-    .graph_plan_update       = NULL,
-    .graph_plan_compute      = NULL,
-    .graph_compute           = ggml_backend_metalium_graph_compute,
-    .event_record            = NULL,
-    .event_wait              = NULL,
-    .graph_optimize          = NULL,
+    .get_name           = ggml_backend_metalium_name,
+    .free               = ggml_backend_metalium_free,
+    .set_tensor_async   = NULL,
+    .get_tensor_async   = NULL,
+    .cpy_tensor_async   = NULL,
+    .synchronize        = ggml_backend_metalium_synchronize,
+    .graph_plan_create  = NULL,
+    .graph_plan_free    = NULL,
+    .graph_plan_update  = NULL,
+    .graph_plan_compute = NULL,
+    .graph_compute      = ggml_backend_metalium_graph_compute,
+    .event_record       = NULL,
+    .event_wait         = NULL,
+    .graph_optimize     = NULL,
 };
 
 static ggml_guid_t ggml_backend_metalium_guid(void) {
