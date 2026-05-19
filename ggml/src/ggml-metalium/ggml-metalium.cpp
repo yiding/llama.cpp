@@ -1928,20 +1928,20 @@ static void ggml_backend_metalium_synchronize(ggml_backend_t backend) {
 }
 
 static struct ggml_backend_i metalium_backend_i = {
-    /* .get_name                = */ ggml_backend_metalium_name,
-    /* .free                    = */ ggml_backend_metalium_free,
-    /* .set_tensor_async        = */ NULL,
-    /* .get_tensor_async        = */ NULL,
-    /* .cpy_tensor_async        = */ NULL,
-    /* .synchronize             = */ ggml_backend_metalium_synchronize,
-    /* .graph_plan_create       = */ NULL,
-    /* .graph_plan_free         = */ NULL,
-    /* .graph_plan_update       = */ NULL,
-    /* .graph_plan_compute      = */ NULL,
-    /* .graph_compute           = */ ggml_backend_metalium_graph_compute,
-    /* .event_record            = */ NULL,
-    /* .event_wait              = */ NULL,
-    /* .graph_optimize          = */ NULL,
+    .get_name                = ggml_backend_metalium_name,
+    .free                    = ggml_backend_metalium_free,
+    .set_tensor_async        = NULL,
+    .get_tensor_async        = NULL,
+    .cpy_tensor_async        = NULL,
+    .synchronize             = ggml_backend_metalium_synchronize,
+    .graph_plan_create       = NULL,
+    .graph_plan_free         = NULL,
+    .graph_plan_update       = NULL,
+    .graph_plan_compute      = NULL,
+    .graph_compute           = ggml_backend_metalium_graph_compute,
+    .event_record            = NULL,
+    .event_wait              = NULL,
+    .graph_optimize          = NULL,
 };
 
 static ggml_guid_t ggml_backend_metalium_guid(void) {
