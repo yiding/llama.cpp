@@ -234,7 +234,7 @@ bool is_ggml_type_supported_by_metalium(ggml_type ggtype, tt::ARCH arch) {
     return ggml2tt_type_internal(ggtype, arch) != tt::tt_metal::DataType::INVALID;
 }
 
-tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
+static tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
     // Since TTNN does not support the traditional view operation, we had to support it ourselves
     // This function, realize, extracts the data from the source tensor and creates a new tensor
     // that is separate from the source tensor. DO NOT eagerly call this function

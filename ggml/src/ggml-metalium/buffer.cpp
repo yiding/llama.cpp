@@ -1,12 +1,13 @@
 #include "buffer.hpp"
 
 #include "ggml.h"
-#include "ttnn/distributed/distributed_tensor.hpp"
-#include "ttnn/types.hpp"
 #include "utils.hpp"
 
 #include <optional>
+#include <ttnn/distributed/distributed_tensor.hpp>
 #include <ttnn/operations/creation/creation.hpp>
+#include <ttnn/operations/data_movement/slice/slice.hpp>
+#include <ttnn/types.hpp>
 
 namespace {
 
@@ -559,8 +560,7 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
             copy_tt_tensor_to_host_pointer<uint32_t>(t, (int *) data, dst_ggtype);
             break;
         default:
-            GGML_ASSERT(false && "Unsupported data type in TT tensor when converting to GGML tensor");
-            break;
+            GGML_ABORT("Unsupported data type in TT tensor when converting to GGML tensor");
     }
 }
 
@@ -666,15 +666,17 @@ tt::tt_metal::Tensor & get_tt_tensor(ggml_tensor * tensor) {
 }
 
 struct ggml_backend_buffer_i ggml_backend_metalium_buffer_interface = {
-    .free_buffer     = ggml_backend_metalium_buffer_free_buffer,
-    .get_base        = ggml_backend_metalium_buffer_get_base,
-    .init_tensor     = ggml_backend_metalium_buffer_init_tensor,
-    .memset_tensor   = nullptr,
-    .set_tensor      = ggml_backend_metalium_buffer_set_tensor,
-    .get_tensor      = ggml_backend_metalium_buffer_get_tensor,
-    .cpy_tensor      = ggml_backend_metalium_buffer_cpy_tensor,
-    .clear           = ggml_backend_metalium_buffer_clear,
-    .reset           = ggml_backend_metalium_buffer_reset,
+    .free_buffer   = ggml_backend_metalium_buffer_free_buffer,
+    .get_base      = ggml_backend_metalium_buffer_get_base,
+    .init_tensor   = ggml_backend_metalium_buffer_init_tensor,
+    .memset_tensor = nullptr,
+    .set_tensor    = ggml_backend_metalium_buffer_set_tensor,
+    .get_tensor    = ggml_backend_metalium_buffer_get_tensor,
+    .set_tensor_2d = nullptr,
+    .get_tensor_2d = nullptr,
+    .cpy_tensor    = ggml_backend_metalium_buffer_cpy_tensor,
+    .clear         = ggml_backend_metalium_buffer_clear,
+    .reset         = ggml_backend_metalium_buffer_reset,
 };
 
 }  // namespace ggml_backend_metalium

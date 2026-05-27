@@ -1,28 +1,12 @@
 #include "ggml-metalium.h"
 
 #include "buffer.hpp"
-#include "fmt/base.h"
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "ggml.h"
-#include "hostdevcommon/common_values.hpp"
-#include "tt-metalium/experimental/fabric/fabric.hpp"
-#include "ttnn/distributed/distributed_tensor.hpp"
-#include "ttnn/operations/ccl/all_reduce/all_reduce.hpp"
-#include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
-#include "ttnn/operations/eltwise/binary/binary.hpp"
-#include "ttnn/operations/eltwise/binary/binary_composite.hpp"
-#include "ttnn/operations/moreh/moreh_group_norm/moreh_group_norm.hpp"
-#include "ttnn/tensor/shape/shape.hpp"
-#include "ttnn/tensor/tensor.hpp"
-#include "ttnn/tensor/types.hpp"
-#include "ttnn/types.hpp"
-#include "umd/device/types/arch.hpp"
-#include "umd/device/types/cluster_descriptor_types.hpp"
 #include "utils.hpp"
 
-#include <string.h>
 #include <sys/types.h>
 
 #include <algorithm>
@@ -38,12 +22,18 @@
 #include <optional>
 #include <regex>
 #include <string_view>
+#include <vector>
+
+#include <tt-metalium/experimental/fabric/fabric.hpp>
 #include <ttnn/core.hpp>
 #include <ttnn/cpp/ttnn/operations/data_movement/gather/tosa/gather_tosa.hpp>
 #include <ttnn/cpp/ttnn/operations/data_movement/scatter/tosa_scatter.hpp>
 #include <ttnn/cpp/ttnn/operations/transformer/sdpa_decode/sdpa_decode.hpp>
 #include <ttnn/device.hpp>
+#include <ttnn/distributed/distributed_tensor.hpp>
+#include <ttnn/operations/ccl/all_reduce/all_reduce.hpp>
 #include <ttnn/operations/copy/typecast/typecast.hpp>
+#include <ttnn/operations/core/compute_kernel/compute_kernel_config.hpp>
 #include <ttnn/operations/creation/creation.hpp>
 #include <ttnn/operations/data_movement/concat/concat.hpp>
 #include <ttnn/operations/data_movement/permute/permute.hpp>
@@ -53,16 +43,24 @@
 #include <ttnn/operations/data_movement/tilize_with_val_padding/tilize_with_val_padding.hpp>
 #include <ttnn/operations/data_movement/transpose/transpose.hpp>
 #include <ttnn/operations/data_movement/untilize/untilize.hpp>
+#include <ttnn/operations/eltwise/binary/binary.hpp>
+#include <ttnn/operations/eltwise/binary/binary_composite.hpp>
 #include <ttnn/operations/eltwise/unary/unary_composite.hpp>
 #include <ttnn/operations/experimental/transformer/nlp_kv_cache_load_slice/nlp_kv_cache_load_slice.hpp>
 #include <ttnn/operations/kv_cache/kv_cache.hpp>
 #include <ttnn/operations/matmul/matmul.hpp>
+#include <ttnn/operations/moreh/moreh_group_norm/moreh_group_norm.hpp>
 #include <ttnn/operations/moreh/moreh_matmul/moreh_matmul.hpp>
 #include <ttnn/operations/normalization/layernorm/layernorm.hpp>
 #include <ttnn/operations/normalization/rmsnorm/rmsnorm.hpp>
 #include <ttnn/operations/normalization/softmax/softmax.hpp>
 #include <ttnn/operations/reduction/generic/generic_reductions.hpp>
-#include <vector>
+#include <ttnn/tensor/shape/shape.hpp>
+#include <ttnn/tensor/tensor.hpp>
+#include <ttnn/tensor/types.hpp>
+#include <ttnn/types.hpp>
+#include <umd/device/types/arch.hpp>
+#include <umd/device/types/cluster_descriptor_types.hpp>
 
 // #include "rope.hpp"
 // #include "mul_mat.hpp"
@@ -147,7 +145,7 @@ static void dump_ggml_tensor_meta(const ggml_tensor * ggtensor) {
 static ttnn::DeviceComputeKernelConfig make_compute_kernel_config(const ttnn::IDevice & device) {
     ttnn::DeviceComputeKernelConfig cfg;
     if (device.arch() == tt::ARCH::WORMHOLE_B0 || device.arch() == tt::ARCH::BLACKHOLE) {
-        cfg = ttnn::WormholeComputeKernelConfig{ .math_fidelity    = MathFidelity::HiFi4,
+        cfg = ttnn::WormholeComputeKernelConfig{ .math_fidelity    = tt::tt_metal::MathFidelity::HiFi4,
                                                  .math_approx_mode = false,
                                                  .fp32_dest_acc_en = false,
                                                  .packer_l1_acc    = false };
@@ -564,7 +562,6 @@ static void ggml_backend_metalium_get_rows(ggml_backend_metalium_context * ctx, 
         return;
     }
 
-    uint32_t     batch    = idxs->ne[1] * idxs->ne[2];
     const auto & idxs_tt  = get_tt_tensor(idxs);
     // The operation wants 3D tensor but we have 4D, op also wants index be 2d
     const auto & src3d    = t.reshape(t.logical_shape().to_rank(3));
@@ -605,7 +602,6 @@ static void ggml_backend_metalium_set_rows(ggml_backend_metalium_context * ctx, 
 
     auto & dst_tt      = get_tt_tensor(dst);
     auto & real_dst_tt = get_tt_tensor(dst->src[2]);
-    auto & idx_tt      = get_tt_tensor(dst->src[1]);
 
     auto                real_dst = realize_ggml_view(dst->src[2]);
     auto                src      = realize_ggml_view(dst->src[0]);
@@ -630,11 +626,8 @@ static void ggml_backend_metalium_set_rows(ggml_backend_metalium_context * ctx, 
 }
 
 static bool ggml_backend_metalium_can_norm(const struct ggml_tensor * dst, bool rms) {
+    GGML_UNUSED(dst);
     GGML_UNUSED(rms);
-    // no hard checks but this seems to work well enough, else we run out of SRAM
-    // if (dst->ne[0] > 4096) {
-    //     return false;
-    // }
     return true;
 }
 
@@ -951,9 +944,10 @@ static void ggml_backend_metalium_sum(ggml_backend_metalium_context * ctx, struc
     GGML_UNUSED(ctx);
 
     auto                              t = realize_ggml_view(dst->src[0]);
-    ttnn::WormholeComputeKernelConfig cfg{
-        .math_fidelity = MathFidelity::HiFi4, .math_approx_mode = false, .fp32_dest_acc_en = true, .packer_l1_acc = true
-    };
+    ttnn::WormholeComputeKernelConfig cfg{ .math_fidelity    = tt::tt_metal::MathFidelity::HiFi4,
+                                           .math_approx_mode = false,
+                                           .fp32_dest_acc_en = true,
+                                           .packer_l1_acc    = true };
     get_tt_tensor(dst) = ttnn::sum(t, std::nullopt, false, std::nullopt, cfg);
 }
 
@@ -1817,8 +1811,7 @@ static bool ggml_backend_metalium_device_supports_op_internal(ggml_backend_dev_t
             case tt::tt_metal::DataType::BFLOAT4_B:
                 return true;
             case tt::tt_metal::DataType::INVALID:
-                GGML_ASSERT(false && "Unsupported data type");
-                break;
+                GGML_ABORT("Unsupported data type");
             default:
                 return false;
         }
@@ -1937,20 +1930,22 @@ static void ggml_backend_metalium_synchronize(ggml_backend_t backend) {
 }
 
 static struct ggml_backend_i metalium_backend_i = {
-    .get_name           = ggml_backend_metalium_name,
-    .free               = ggml_backend_metalium_free,
-    .set_tensor_async   = NULL,
-    .get_tensor_async   = NULL,
-    .cpy_tensor_async   = NULL,
-    .synchronize        = ggml_backend_metalium_synchronize,
-    .graph_plan_create  = NULL,
-    .graph_plan_free    = NULL,
-    .graph_plan_update  = NULL,
-    .graph_plan_compute = NULL,
-    .graph_compute      = ggml_backend_metalium_graph_compute,
-    .event_record       = NULL,
-    .event_wait         = NULL,
-    .graph_optimize     = NULL,
+    .get_name            = ggml_backend_metalium_name,
+    .free                = ggml_backend_metalium_free,
+    .set_tensor_async    = nullptr,
+    .get_tensor_async    = nullptr,
+    .set_tensor_2d_async = nullptr,
+    .get_tensor_2d_async = nullptr,
+    .cpy_tensor_async    = nullptr,
+    .synchronize         = ggml_backend_metalium_synchronize,
+    .graph_plan_create   = nullptr,
+    .graph_plan_free     = nullptr,
+    .graph_plan_update   = nullptr,
+    .graph_plan_compute  = nullptr,
+    .graph_compute       = ggml_backend_metalium_graph_compute,
+    .event_record        = nullptr,
+    .event_wait          = nullptr,
+    .graph_optimize      = nullptr,
 };
 
 static ggml_guid_t ggml_backend_metalium_guid(void) {
@@ -1977,10 +1972,6 @@ static ggml_backend_t ggml_backend_metalium_init(ggml_backend_metalium_device_co
                           /* .device    = */ ggml_backend_reg_dev_get(ggml_backend_metalium_reg(), device_id),
                           /* .context   = */ ctx };
     return backend;
-}
-
-bool ggml_backend_is_metalium(ggml_backend_t backend) {
-    return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_metalium_guid());
 }
 
 static const char * ggml_backend_metaliium_reg_get_name(ggml_backend_reg_t reg) {

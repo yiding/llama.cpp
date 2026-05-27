@@ -13,28 +13,30 @@ ggml_add_backend_library(ggml-metalium
     # soft_max.cpp
 )
 
-target_include_directories(ggml-metalium PRIVATE
-    $ENV{TT_METAL_HOME}/build/include
-    $ENV{TT_METAL_HOME}/build/include/metalium-thirdparty
-    # Metalium
-    $ENV{TT_METAL_HOME}
-    $ENV{TT_METAL_HOME}/tt_metal
-    $ENV{TT_METAL_HOME}/tt_metal/api
-    $ENV{TT_METAL_HOME}/tt_stl
-    $ENV{TT_METAL_HOME}/tt_metal/hw/inc/
-    $ENV{TT_METAL_HOME}/tt_metal/third_party/tracy/public/tracy
-    $ENV{TT_METAL_HOME}/tt_metal/third_party/tracy/public/
-    $ENV{TT_METAL_HOME}/tt_metal/hostdevcommon/api/
-    $ENV{TT_METAL_HOME}/tt_metal/include
-    $ENV{TT_METAL_HOME}/tt_metal/include
+target_include_directories(ggml-metalium
+    SYSTEM PRIVATE
+        $ENV{TT_METAL_HOME}/build/include
+        $ENV{TT_METAL_HOME}/build/include/metalium-thirdparty
+        # Metalium
+        $ENV{TT_METAL_HOME}
+        $ENV{TT_METAL_HOME}/tt_metal
+        $ENV{TT_METAL_HOME}/tt_metal/api
+        $ENV{TT_METAL_HOME}/tt_stl
+        $ENV{TT_METAL_HOME}/tt_metal/hw/inc/
+        $ENV{TT_METAL_HOME}/tt_metal/third_party/tracy/public/tracy
+        $ENV{TT_METAL_HOME}/tt_metal/third_party/tracy/public/
+        $ENV{TT_METAL_HOME}/tt_metal/hostdevcommon/api/
+        $ENV{TT_METAL_HOME}/tt_metal/include
+        $ENV{TT_METAL_HOME}/tt_metal/include
 
-    # TTNN
-    $ENV{TT_METAL_HOME}/ttnn
-    $ENV{TT_METAL_HOME}/ttnn/api
-    $ENV{TT_METAL_HOME}/ttnn/cpp
+        # TTNN
+        $ENV{TT_METAL_HOME}/ttnn
+        $ENV{TT_METAL_HOME}/ttnn/api
+        $ENV{TT_METAL_HOME}/ttnn/cpp
 
     # Parent GGML stuff
-    ..
+    PRIVATE
+        ..
 )
 
 target_link_directories(ggml-metalium PRIVATE
