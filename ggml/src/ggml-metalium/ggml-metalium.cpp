@@ -22,8 +22,6 @@
 #include <optional>
 #include <regex>
 #include <string_view>
-#include <vector>
-
 #include <tt-metalium/experimental/fabric/fabric.hpp>
 #include <ttnn/core.hpp>
 #include <ttnn/cpp/ttnn/operations/data_movement/gather/tosa/gather_tosa.hpp>
@@ -61,6 +59,7 @@
 #include <ttnn/types.hpp>
 #include <umd/device/types/arch.hpp>
 #include <umd/device/types/cluster_descriptor_types.hpp>
+#include <vector>
 
 // #include "rope.hpp"
 // #include "mul_mat.hpp"
@@ -1259,7 +1258,10 @@ static void ggml_metalium_fused_norm(ggml_backend_metalium_context * ctx,
                                      std::optional<ggml_tensor *>    bias) {
     GGML_UNUSED(ctx);
 
-    const ttnn::Tensor &              input = realize_ggml_view(norm->src[0]);
+    GGML_ASSERT(ggml_n_dims(norm) <= 2);
+    GGML_ASSERT(ggml_n_dims(norm->src[0]) <= 2);
+    ttnn::Tensor input = pad_batch(realize_ggml_view(norm->src[0]), 2, ttnn::DRAM_MEMORY_CONFIG);
+
     std::optional<const ttnn::Tensor> scale_tt;
     std::optional<const ttnn::Tensor> bias_tt;
     ttnn::Tensor *                    last = &get_tt_tensor(norm);
@@ -1295,14 +1297,15 @@ static void ggml_metalium_fused_norm(ggml_backend_metalium_context * ctx,
 
     switch (norm->op) {
         case GGML_OP_RMS_NORM:
-            *last = ttnn::rms_norm(input, esp, scale_tt, bias_tt);
+            res = ttnn::rms_norm(input, esp, scale_tt, bias_tt);
             break;
         case GGML_OP_NORM:
-            *last = ttnn::layer_norm(input, esp, scale_tt, bias_tt);
+            res = ttnn::layer_norm(input, esp, scale_tt, bias_tt);
             break;
         default:
             GGML_ABORT("unexpected op type for norm node %s: %d", norm->name, norm->type);
     }
+    *last = unpad_batch(res, 2, norm->ne[1], ttnn::DRAM_MEMORY_CONFIG);
 }
 
 static void ggml_metalium_fused_ffn(ggml_backend_metalium_context *    ctx,
@@ -1358,11 +1361,12 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context *    ctx,
             GGML_ABORT("unsupported GLU op");
     }
 
-    auto hidden_tt = realize_ggml_view(hidden_input);
-
-    auto batch_size                 = hidden_input->ne[3] * hidden_input->ne[2] * hidden_input->ne[1];
+    auto batch_size                 = ggml_nrows(hidden_input);
     // TODO: replace magic threshold with configuration.
     auto intermediate_memory_config = batch_size > 256 ? ttnn::DRAM_MEMORY_CONFIG : ttnn::L1_MEMORY_CONFIG;
+
+    GGML_ASSERT(ggml_n_dims(hidden_input) <= 2);
+    auto hidden_tt = pad_batch(realize_ggml_view(hidden_input), 2, intermediate_memory_config);
 
     auto gate_out = ttnn::matmul(
         /*input_tensor_a=*/hidden_tt,
@@ -1411,11 +1415,12 @@ static void ggml_metalium_fused_ffn(ggml_backend_metalium_context *    ctx,
     }
 
     if (ffn_add.has_value()) {
-        tensor_extra::from(ffn_add.value())->tensor = ttnn::add(down_out, realize_ggml_view(attn_residual.value()),
-                                                                /*output_dtype=*/std::nullopt,
-                                                                /*memory_config=*/ttnn::DRAM_MEMORY_CONFIG);
+        down_out = ttnn::add(down_out, realize_ggml_view(attn_residual.value()), /*output_dtype=*/std::nullopt);
+        tensor_extra::from(ffn_add.value())->tensor =
+            unpad_batch(down_out, 2, ffn_add.value()->ne[1], ttnn::DRAM_MEMORY_CONFIG);
     } else {
-        tensor_extra::from(ffn_down)->tensor = down_out;
+        GGML_ASSERT(ggml_n_dims(ffn_down) <= 2);
+        tensor_extra::from(ffn_down)->tensor = unpad_batch(down_out, 2, ffn_down->ne[1], ttnn::DRAM_MEMORY_CONFIG);
     }
 
     down_out.deallocate();

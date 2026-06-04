@@ -3,9 +3,12 @@
 #include "buffer.hpp"
 #include "ggml.h"
 
-#include <tt-metalium/buffer.hpp>
-
+#include <bit>
 #include <filesystem>
+#include <tt-metalium/buffer.hpp>
+#include <tt_stl/small_vector.hpp>
+#include <ttnn/operations/data_movement/pad/pad.hpp>
+#include <ttnn/operations/data_movement/slice/slice.hpp>
 #include <unordered_map>
 
 #ifdef GGML_METALIUM_EMBED_KERNELS
@@ -129,12 +132,12 @@ std::string to_string_precise(float value) {
 }
 
 bool ggml_tt_tensors_shape_equal(const ggml_tensor * ggtensor, const tt::tt_metal::Tensor & ttensor) {
-    tensor_extra * meta = tensor_extra::from(ggtensor);
+    tensor_extra *                         meta   = tensor_extra::from(ggtensor);
     ggml_backend_metalium_buffer_context * bufctx = ggml_backend_metalium_buffer_context::get(ggtensor->buffer);
-    ttnn::Shape shape = ttensor.logical_shape();
+    ttnn::Shape                            shape  = ttensor.logical_shape();
     if (meta->is_pretransposed) {
-        size_t h = shape[-1];
-        size_t w = shape[-2];
+        size_t h  = shape[-1];
+        size_t w  = shape[-2];
         shape[-1] = w;
         shape[-2] = h;
     }
@@ -394,7 +397,7 @@ static tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
         return ttnn::permute(t, permute_tt_real);
     }
 
-    const auto &tt_tensor = get_tt_tensor(tensor);
+    const auto & tt_tensor = get_tt_tensor(tensor);
     if (tt_tensor.tensor_attributes) {
         return tt_tensor;
     }
@@ -417,7 +420,7 @@ static tt::tt_metal::Tensor realize_ggml_view_impl(const ggml_tensor * tensor) {
 }
 
 tt::tt_metal::Tensor realize_ggml_view(const ggml_tensor * tensor) {
-    auto                         res  = realize_ggml_view_impl(tensor);
+    auto res = realize_ggml_view_impl(tensor);
 
     if (!ggml_tt_tensors_shape_equal(tensor, res)) {
         std::cout << "FATAL ERROR: Shape mismatch between TTNN and GGML after view op " << ggml_op_name(tensor->op)
@@ -472,12 +475,50 @@ const ggml_backend_metalium_debug_flags g_debug_flags = []() {
     };
 }();
 
-tt::tt_metal::Shape tt_shape_of(const ggml_tensor* ggtensor) {
-  Shape::Container dims;
-  for (int i = 0; i < GGML_MAX_DIMS; i++) {
-    dims.push_back(ggtensor->ne[GGML_MAX_DIMS - i - 1]);
-  }
-  return tt::tt_metal::Shape(dims);
+tt::tt_metal::Shape tt_shape_of(const ggml_tensor * ggtensor) {
+    Shape::Container dims;
+    for (int i = 0; i < GGML_MAX_DIMS; i++) {
+        dims.push_back(ggtensor->ne[GGML_MAX_DIMS - i - 1]);
+    }
+    return tt::tt_metal::Shape(dims);
+}
+
+ttnn::Tensor pad_batch(const ttnn::Tensor & t, size_t dim, const ttnn::MemoryConfig & memory_config) {
+    ttsl::SmallVector<ttnn::operations::data_movement::PadSpecDim> padding;
+    for (size_t i = 0; i < t.logical_shape().rank(); i++) {
+        if (i == dim) {
+            padding.push_back({ 0, 0 });
+        } else {
+            auto ne     = t.logical_shape()[i];
+            auto pad_to = std::bit_ceil(ne);
+            if (ne == pad_to) {
+                return t;
+            }
+            padding.push_back({ 0, pad_to - ne });
+        }
+    }
+
+    return ttnn::pad(t, padding, /*value=*/0, /*use_multicore=*/true, memory_config);
+}
+
+ttnn::Tensor unpad_batch(const ttnn::Tensor & t, size_t dim, uint32_t ne, const ttnn::MemoryConfig & memory_config) {
+    ttsl::SmallVector<uint32_t> begins;
+    ttsl::SmallVector<uint32_t> ends;
+    ttsl::SmallVector<uint32_t> steps;
+
+    for (size_t i = 0; i < t.logical_shape().rank(); i++) {
+        if (i == dim) {
+            begins.push_back(0);
+            ends.push_back(ne);
+            steps.push_back(1);
+        } else {
+            begins.push_back(0);
+            ends.push_back(t.logical_shape()[i]);
+            steps.push_back(1);
+        }
+    }
+
+    return ttnn::slice(t, begins, ends, steps, memory_config);
 }
 
 }  // namespace ggml_backend_metalium
