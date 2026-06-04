@@ -18,8 +18,11 @@ add_library(mtmd
             models/cogvlm.cpp
             models/conformer.cpp
             models/dotsocr.cpp
+            models/exaone4_5.cpp
             models/gemma4a.cpp
             models/gemma4v.cpp
+            models/gemma4ua.cpp
+            models/gemma4uv.cpp
             models/glm4v.cpp
             models/granite-speech.cpp
             models/hunyuanvl.cpp

@@ -33,6 +33,9 @@ get about 11 tps/user decode, with no noticible slowdown with concurrency of 4.
 In comparison, with GPU + CPU (9965WX), I get around 6 t/s/u decode, and much
 worse prefill.
 
+Using the MTP enabled Qwen3.6-27B, I can get single token decode speed to 30+
+tps, however multi-user performance is suboptimal due to upstream implementation
+issues.
 
 # Ops
 
@@ -63,6 +66,14 @@ GGML_METALIUM_MESH_SHAPE=1x2
 ```
 
 Rather annoyingly I notice I have to reset the card after running in this mode.
+
+# Implementation gotchas
+
+When using dynamic batching we might see a variety of batch sizes. This
+necessitates multiple programs to be compiled, and L1 resources allocated. This
+leads to L1 resource exhaustion due to allocated CBs as programs are never
+unloaded. Because of this, ffn and norm operations are padded to the next power
+of 2. The pad and slice operations do not consume additional L1.
 
 # Acknowledgements
 
