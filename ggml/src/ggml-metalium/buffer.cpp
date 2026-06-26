@@ -487,9 +487,7 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
     // 2. If the TT tensor is quantized, cast it to BFLOAT16
     // 3. Call copy_tt_tensor_to_host_pointer to convert the TT tensor to GGML tensor
     //    - copy_tt_tensor_to_host_pointer internally handles the data type conversion
-    GGML_ASSERT(size == ggml_nbytes(tensor));
     GGML_ASSERT(tensor->extra != NULL);
-    GGML_UNUSED(offset);
 
     // ggml_backend_metalium_buffer_context * ctx = (ggml_backend_metalium_buffer_context *)buffer->context;
 
@@ -540,6 +538,22 @@ static void ggml_backend_metalium_buffer_get_tensor(ggml_backend_buffer_t buffer
 
     if (tensor_extra::from(tensor)->is_pretransposed) {
         t = ttnn::transpose(t, -2, -1);
+    }
+
+    // Support some sub-tensor fetches that we can infer from the size / offset.
+    if (size == ggml_nbytes(tensor) && offset == 0) {  // Fetch everything.
+    } else if (ggml_n_dims(tensor) == 2 && !ggml_is_quantized(tensor->type) &&
+               // starting from the start of a row
+               offset % tensor->nb[1] == 0 &&
+               // fetching entire rows
+               size % tensor->nb[1] == 0) {
+        // Fetching whole rows of a 2D tensor, e.g. for fetching from embeddings.
+        uint32_t start_row = offset / tensor->nb[1];
+        uint32_t n_rows    = size / tensor->nb[1];
+        t = ttnn::slice<uint32_t>(t, { 0, 0, start_row, 0 }, { 1, 1, start_row + n_rows, t.logical_shape()[3] },
+                                  { 1, 1, 1, 1 });
+    } else {
+        GGML_ABORT("Unsupported sub-tensor get");
     }
 
     if (t.dtype() != tt::tt_metal::DataType::BFLOAT16 && t.dtype() != tt::tt_metal::DataType::FLOAT32 &&
@@ -605,7 +619,7 @@ static enum ggml_status ggml_backend_metalium_buffer_init_tensor(ggml_backend_bu
 
     const auto & shape = tt_shape_of(tensor);
 
-    string_view       name{ tensor->name };
+    string_view name{ tensor->name };
     if (name.find("ffn_gate.weight") != string_view::npos || name.find("ffn_up.weight") != string_view::npos) {
         meta->is_pretransposed = true;
         // Sharding happens before possible transposing, so we use dim 2 (i.e.
